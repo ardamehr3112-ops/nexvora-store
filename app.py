@@ -6,7 +6,7 @@ from functools import wraps
 # NEXVORA STORE PRO V2
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "CHANGE_THIS_ADMIN_PASSWORD")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Jurabekjon123.")
 WHATSAPP_NUMBER = "".join(c for c in os.environ.get("WHATSAPP_NUMBER", "992919186336") if c.isdigit())
 
 BASE = os.path.dirname(os.path.abspath(__file__))
