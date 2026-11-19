@@ -29,9 +29,9 @@ import hmac
 import uuid
 
 # ========================= SETTINGS =========================
-SECRET_KEY = "CHANGE_TO_A_LONG_RANDOM_SECRET_KEY_BEFORE_USE"
-ADMIN_PASSWORD = "CHANGE_TO_YOUR_OWN_ADMIN_PASSWORD"
-WHATSAPP_NUMBER = "992XXXXXXXXX"  # мисол: 992900000000
+SECRET_KEY = "Jurajurajurajon123."
+ADMIN_PASSWORD = "Jurabekjon123."
+WHATSAPP_NUMBER = "992111301210"  # мисол: 992900000000
 STORE_NAME = "NEXVORA"
 CURRENCY = "сомонӣ"
 # ============================================================
