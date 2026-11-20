@@ -16,7 +16,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('COOKIE_SECURE', '0') == '1'
 
 WHATSAPP_NUMBER = os.environ.get('WHATSAPP_NUMBER', '992919186336')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Jurabekjon123.')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'ChangeMe-12345')
 DELIVERY_FEE = max(0, int(os.environ.get('DELIVERY_FEE', '0')))
 DATA_DIR = os.environ.get('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
