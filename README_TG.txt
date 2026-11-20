@@ -1,25 +1,58 @@
-# NEXVORA STORE — дастур (Тоҷикӣ)
 
-## Файлҳо
-- `app.py` — коди асосии мағоза.
-- `requirements.txt` — китобхонаҳои лозим.
-- `README_TG.txt` — ин дастур.
+# NEXVORA STORE
 
-## Иҷро дар Pydroid 3
-1. Ҳар се файлро ба як папка гузоред.
-2. Дар Terminal иҷро кунед: `pip install -r requirements.txt`
-3. Сайтро оғоз кунед: `python app.py`
-4. Дар браузер кушоед: `http://127.0.0.1:5000`
+A Flask-based online store with:
+- Product catalog
+- Shopping cart and checkout
+- Favorites and product comparison
+- Admin dashboard
+- Product images and videos
+- Reviews and questions
+- Promo codes
+- Order tracking
+- CSV import/export
+- Tajik, Russian and English languages
 
-## Deploy дар Render
-- Build Command: `pip install -r requirements.txt`
-- Start Command: `gunicorn app:app`
-- Environment variables: `SECRET_KEY` (калиди махфии дароз), `COOKIE_SECURE=1`, `ADMIN_PASSWORD` (пароли қавии админ), `WHATSAPP_NUMBER` (рақам бо коди кишвар, танҳо рақамҳо), `DELIVERY_FEE` (ихтиёрӣ).
-- Барои сохтани SECRET_KEY: дар Python `import secrets; print(secrets.token_hex(32))` иҷро кунед ва натиҷаро ба Render Environment гузоред. Калидро махфӣ нигоҳ доред.
-- Агар база ва upload-ҳо бояд баъди redeploy нигоҳ дошта шаванд, Render Disk-и доимӣ пайваст кунед ва `DATA_DIR`-ро ба роҳи Disk гузоред.
+## Installation
 
-## CSRF / Bad Request
-Ҳамаи POST-form-ҳо токени CSRF доранд. Агар кукиҳои браузер кӯҳна бошанд, кукиҳои сайти Render-ро тоза кунед ва сайтро аз нав кушоед. `SECRET_KEY`-ро дар Render доимӣ нигоҳ доред; онро баъди ҳар deploy иваз накунед.
+```bash
+pip install -r requirements.txt
+```
 
-## Аввалин воридшавии Admin
-Пароли аввал аз `ADMIN_PASSWORD` гирифта мешавад. Пароли пешфарзро истифода накунед; онро дар Render Environment иваз кунед. Дар панели Admin имкони иваз кардани парол низ ҳаст.
+## Run locally
+
+```bash
+python app.py
+```
+
+## Render Deployment
+
+Build Command:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start Command:
+
+```bash
+gunicorn app:app
+```
+
+## Environment Variables
+
+- SECRET_KEY: Secret key for Flask sessions
+- ADMIN_PASSWORD: Admin login password
+- WHATSAPP_NUMBER: WhatsApp contact number
+
+## Database
+
+SQLite database:
+nexvora_pro.db
+
+Product uploads:
+static/uploads/
+
+## Default Admin Password
+
+Set ADMIN_PASSWORD in environment variables before deployment.
