@@ -1,18 +1,25 @@
-NEXVORA STORE — бастаи нашр дар Render
+# NEXVORA STORE — дастур (Тоҷикӣ)
 
-Файлҳо:
-- app.py: барномаи Flask
-- requirements.txt: китобхонаҳои зарурӣ
-- render.yaml: танзимоти хостинги Render
+## Файлҳо
+- `app.py` — коди асосии мағоза.
+- `requirements.txt` — китобхонаҳои лозим.
+- `README_TG.txt` — ин дастур.
 
-Пеш аз нашр:
-1. Ин се файлро ба решаи GitHub repository гузоред.
-2. Дар Render: New + -> Blueprint ё Web Service.
-3. Агар Blueprint интихоб кунед, render.yaml-ро истифода мебарад.
-4. Барои ADMIN_PASSWORD пароли нави дароз ва махфӣ гузоред.
-5. WHATSAPP_NUMBER бояд рақами WhatsApp бо рамзи кишвар, танҳо рақамҳо бошад.
+## Иҷро дар Pydroid 3
+1. Ҳар се файлро ба як папка гузоред.
+2. Дар Terminal иҷро кунед: `pip install -r requirements.txt`
+3. Сайтро оғоз кунед: `python app.py`
+4. Дар браузер кушоед: `http://127.0.0.1:5000`
 
-ОГОҲӢ:
-Ин конфигуратсияи Free барои санҷиш аст. Дар хостинги ройгони Render файлҳои SQLite ва аксҳо нигоҳдории доимӣ надоранд; баъди restart/redeploy метавонанд гум шаванд. Барои мағозаи воқеӣ базаи беруна ва нигоҳдории доимии аксҳо лозим аст.
+## Deploy дар Render
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `gunicorn app:app`
+- Environment variables: `SECRET_KEY` (калиди махфии дароз), `COOKIE_SECURE=1`, `ADMIN_PASSWORD` (пароли қавии админ), `WHATSAPP_NUMBER` (рақам бо коди кишвар, танҳо рақамҳо), `DELIVERY_FEE` (ихтиёрӣ).
+- Барои сохтани SECRET_KEY: дар Python `import secrets; print(secrets.token_hex(32))` иҷро кунед ва натиҷаро ба Render Environment гузоред. Калидро махфӣ нигоҳ доред.
+- Агар база ва upload-ҳо бояд баъди redeploy нигоҳ дошта шаванд, Render Disk-и доимӣ пайваст кунед ва `DATA_DIR`-ро ба роҳи Disk гузоред.
 
-Парол ё SECRET_KEY-ро дар GitHub, README ё паёмҳои оммавӣ нанависед. Онҳоро танҳо дар Environment Variables-и Render ворид кунед.
+## CSRF / Bad Request
+Ҳамаи POST-form-ҳо токени CSRF доранд. Агар кукиҳои браузер кӯҳна бошанд, кукиҳои сайти Render-ро тоза кунед ва сайтро аз нав кушоед. `SECRET_KEY`-ро дар Render доимӣ нигоҳ доред; онро баъди ҳар deploy иваз накунед.
+
+## Аввалин воридшавии Admin
+Пароли аввал аз `ADMIN_PASSWORD` гирифта мешавад. Пароли пешфарзро истифода накунед; онро дар Render Environment иваз кунед. Дар панели Admin имкони иваз кардани парол низ ҳаст.
