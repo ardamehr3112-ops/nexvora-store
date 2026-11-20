@@ -4,6 +4,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from datetime import datetime
 from urllib.parse import quote
 from functools import wraps
+from contextlib import contextmanager
 import os, sqlite3, uuid, json, secrets, csv, io, hmac
 
 # ===================== NEXVORA STORE =====================
@@ -12,10 +13,10 @@ app.secret_key = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 25 * 1024 * 1024
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('COOKIE_SECURE', '0') == '1'
 
-# CONFIG: WhatsApp number should be international format, digits only, e.g. 992XXXXXXXXX
 WHATSAPP_NUMBER = os.environ.get('WHATSAPP_NUMBER', '992919186336')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '111111')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Jurabekjon123.'')
 DELIVERY_FEE = max(0, int(os.environ.get('DELIVERY_FEE', '0')))
 DATA_DIR = os.environ.get('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
@@ -24,82 +25,96 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 ALLOWED_IMAGES = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
 ALLOWED_VIDEOS = {'mp4', 'webm'}
 
-# ===================== DATABASE =====================
+@contextmanager
 def db():
     con = sqlite3.connect(DB_PATH, timeout=20)
     con.row_factory = sqlite3.Row
     con.execute('PRAGMA foreign_keys=ON')
-    return con
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
 
 def init_db():
     with db() as con:
         con.executescript('''
         CREATE TABLE IF NOT EXISTS products(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL, description TEXT DEFAULT '', price REAL NOT NULL DEFAULT 0,
-            old_price REAL DEFAULT 0, category TEXT DEFAULT 'Дигар', images TEXT DEFAULT '[]',
-            video TEXT DEFAULT '', stock INTEGER DEFAULT 0, featured INTEGER DEFAULT 0,
-            active INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+            description TEXT DEFAULT '', price REAL NOT NULL DEFAULT 0,
+            old_price REAL DEFAULT 0, category TEXT DEFAULT 'Дигар',
+            images TEXT DEFAULT '[]', video TEXT DEFAULT '', stock INTEGER DEFAULT 0,
+            featured INTEGER DEFAULT 0, active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS orders(
             id TEXT PRIMARY KEY, customer TEXT, phone TEXT, address TEXT, items TEXT,
-            subtotal REAL, discount REAL DEFAULT 0, delivery REAL DEFAULT 0, total REAL,
-            promo TEXT DEFAULT '', status TEXT DEFAULT 'Қабул шуд', created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            subtotal REAL, discount REAL DEFAULT 0, delivery REAL DEFAULT 0,
+            total REAL, promo TEXT DEFAULT '', status TEXT DEFAULT 'Қабул шуд',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS promos(code TEXT PRIMARY KEY, discount REAL, active INTEGER DEFAULT 1);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
         ''')
         cols = {r['name'] for r in con.execute('PRAGMA table_info(products)')}
-        migrations = [('old_price','REAL DEFAULT 0'),('images',"TEXT DEFAULT '[]'"),('video',"TEXT DEFAULT ''"),('stock','INTEGER DEFAULT 0'),('featured','INTEGER DEFAULT 0'),('active','INTEGER DEFAULT 1')]
-        for col, typ in migrations:
-            if col not in cols:
-                con.execute(f'ALTER TABLE products ADD COLUMN {col} {typ}')
+        for col, typ in [('old_price','REAL DEFAULT 0'),('images',"TEXT DEFAULT '[]'"),('video',"TEXT DEFAULT ''"),('stock','INTEGER DEFAULT 0'),('featured','INTEGER DEFAULT 0'),('active','INTEGER DEFAULT 1')]:
+            if col not in cols: con.execute(f'ALTER TABLE products ADD COLUMN {col} {typ}')
         con.execute("INSERT OR IGNORE INTO promos(code,discount,active) VALUES('WELCOME',10,1)")
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('banner','NEXVORA — Хариди осон ва боэътимод')")
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('video_ad','')")
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('whatsapp','')")
+        # Hash the initial password once; a password changed in Admin is stored in settings.
+        if not con.execute("SELECT value FROM settings WHERE key='admin_password_hash'").fetchone():
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('admin_password_hash',?)", (generate_password_hash(ADMIN_PASSWORD),))
 init_db()
 
 # ===================== SECURITY / HELPERS =====================
 def csrf_token():
-    if 'csrf' not in session:
-        session['csrf'] = secrets.token_hex(24)
+    if 'csrf' not in session: session['csrf'] = secrets.token_hex(24)
     return session['csrf']
 app.jinja_env.globals['csrf_token'] = csrf_token
 
 @app.before_request
 def csrf_check():
-    if request.method == 'POST' and not hmac.compare_digest(str(request.form.get('csrf','')), str(session.get('csrf',''))):
-        abort(400, 'CSRF validation failed')
+    if request.method == 'POST':
+        submitted = str(request.form.get('csrf', ''))
+        stored = str(session.get('csrf', ''))
+        if not stored or not hmac.compare_digest(submitted, stored): abort(400, 'CSRF validation failed')
 
 def admin_required(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
-        if not session.get('admin'):
-            return redirect(url_for('admin_login'))
+        if not session.get('admin'): return redirect(url_for('admin_login'))
         return fn(*args, **kwargs)
     return wrapped
 
+def admin_password_hash():
+    with db() as con: row = con.execute("SELECT value FROM settings WHERE key='admin_password_hash'").fetchone()
+    return row['value'] if row else generate_password_hash(ADMIN_PASSWORD)
+
+def verify_admin_password(password):
+    try: return check_password_hash(admin_password_hash(), password)
+    except (ValueError, TypeError): return False
+
 def allowed_file(filename, video=False):
-    if not filename or '.' not in filename:
-        return False
+    if not filename or '.' not in filename: return False
     ext = filename.rsplit('.', 1)[1].lower()
     return ext in (ALLOWED_VIDEOS if video else ALLOWED_IMAGES)
 
 def save_upload(file, video=False):
-    if not file or not file.filename or not allowed_file(file.filename, video):
-        return ''
+    if not file or not file.filename or not allowed_file(file.filename, video): return ''
     ext = file.filename.rsplit('.',1)[1].lower()
     filename = secure_filename(f'{uuid.uuid4().hex}.{ext}')
     file.save(os.path.join(UPLOAD_DIR, filename))
     return filename
 
 def setting(key, default=''):
-    with db() as con:
-        r = con.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+    with db() as con: r = con.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
     return r['value'] if r else default
 
 def set_setting(key, value):
-    with db() as con:
-        con.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)', (key, value))
+    with db() as con: con.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)', (key, value))
 
 def p_dict(row):
     p = dict(row)
@@ -109,33 +124,35 @@ def p_dict(row):
 
 def cart_data():
     cart = session.get('cart', {})
-    valid = {str(k): max(1, int(v)) for k,v in cart.items() if str(k).isdigit()}
+    valid = {}
+    for k, v in cart.items():
+        if str(k).isdigit():
+            try: valid[str(k)] = max(1, int(v))
+            except (ValueError, TypeError): pass
     ids = [int(k) for k in valid]
     if not ids: return [], 0
     with db() as con:
         rows = con.execute(f"SELECT * FROM products WHERE active=1 AND id IN ({','.join('?'*len(ids))})", ids).fetchall()
-    items, total, clean_cart = [], 0, {}
+    items, total, clean = [], 0, {}
     for row in rows:
-        p = p_dict(row)
-        qty = min(valid.get(str(p['id']), 1), max(0, int(p['stock'])))
+        p = p_dict(row); qty = min(valid.get(str(p['id']), 1), max(0, int(p['stock'])))
         if qty < 1: continue
         p['qty'] = qty; p['line_total'] = p['price'] * qty
-        items.append(p); total += p['line_total']; clean_cart[str(p['id'])] = qty
-    session['cart'] = clean_cart
+        items.append(p); total += p['line_total']; clean[str(p['id'])] = qty
+    session['cart'] = clean
     return items, total
 
 BASE = r'''<!doctype html><html lang="tg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#101116"><title>{{ title }} · NEXVORA</title>
 <style>
-:root{--bg:#0b0b10;--panel:#15151d;--panel2:#1d1d27;--gold:#e7bd63;--gold2:#f6d98e;--text:#f7f5ef;--muted:#aaa8b3;--line:#30303b;--green:#6dd59a;--red:#ff7676}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 12% 0%,#211b29 0,transparent 32%),var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}a{color:inherit;text-decoration:none}img{max-width:100%}.wrap{max-width:1180px;margin:auto;padding:16px}.nav{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0 18px}.brand{font-weight:950;font-size:26px;letter-spacing:3px;background:linear-gradient(90deg,var(--gold),#fff0bd);-webkit-background-clip:text;color:transparent}.links{display:flex;gap:8px;flex-wrap:wrap}.links a,.navlink{background:var(--panel2);border:1px solid var(--line);padding:9px 12px;border-radius:12px;font-size:14px}.hero{padding:30px 24px;border:1px solid #50432b;border-radius:22px;background:linear-gradient(130deg,#211d28,#302719 65%,#17151d);margin:10px 0 22px;box-shadow:0 12px 40px #0003}.hero h1{margin:0 0 8px;font-size:clamp(24px,5vw,38px)}.muted{color:var(--muted)}.gold{color:var(--gold)}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:15px}.card{background:linear-gradient(160deg,#1b1b24,#14141b);border:1px solid var(--line);border-radius:18px;padding:13px;overflow:hidden;box-shadow:0 8px 24px #0002}.pic{width:100%;height:200px;object-fit:cover;border-radius:13px;background:#252530}.price{font-size:20px;font-weight:850;color:var(--gold2)}.old{text-decoration:line-through;color:#8d8994;font-size:14px;margin-left:7px}.btn,button{border:0;display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,var(--gold2),var(--gold));color:#1b1710;padding:11px 15px;border-radius:12px;font-weight:800;cursor:pointer;font-family:inherit}.btn2{background:#292934;color:white;border:1px solid #41414c}.danger{background:#47252a;color:#fff}.form{display:grid;gap:12px;max-width:720px}.input,select,textarea{width:100%;padding:12px;border-radius:11px;border:1px solid #3b3b47;background:#101017;color:#fff;font:inherit}.input:focus,select:focus,textarea:focus{outline:2px solid #cba65c;outline-offset:1px}.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}.tag{display:inline-block;padding:5px 9px;border-radius:99px;background:#30291e;color:var(--gold2);font-size:12px;border:1px solid #55452b}.table{width:100%;border-collapse:collapse;background:#14141b;border-radius:12px;overflow:hidden}.table td,.table th{padding:10px;border-bottom:1px solid #30303b;text-align:left;vertical-align:top}.flash{padding:12px;border-radius:12px;background:#243329;border:1px solid #35523d;margin:10px 0}.footer{padding:28px 12px;text-align:center;color:var(--muted)}.small{font-size:13px}.video{width:100%;max-height:360px;border-radius:16px;margin:14px 0}.search{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;margin:14px 0 20px}.adminbox{border:1px solid var(--line);padding:14px;border-radius:15px;margin:12px 0}.stat{flex:1;min-width:130px}.stat strong{font-size:24px;color:var(--gold)}.thumb{width:64px;height:64px;object-fit:cover;border-radius:9px}.status{font-weight:700;color:var(--gold2)}.wide{width:100%}.empty{text-align:center;padding:32px;border:1px dashed #41414b;border-radius:18px;color:var(--muted)}
+:root{--bg:#0b0b10;--panel:#15151d;--panel2:#1d1d27;--gold:#e7bd63;--gold2:#f6d98e;--text:#f7f5ef;--muted:#aaa8b3;--line:#30303b}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 12% 0%,#211b29 0,transparent 32%),var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}a{color:inherit;text-decoration:none}img{max-width:100%}.wrap{max-width:1180px;margin:auto;padding:16px}.nav{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 0 18px}.brand{font-weight:950;font-size:26px;letter-spacing:3px;background:linear-gradient(90deg,var(--gold),#fff0bd);-webkit-background-clip:text;color:transparent}.links{display:flex;gap:8px;flex-wrap:wrap}.links a,.navlink{background:var(--panel2);border:1px solid var(--line);padding:9px 12px;border-radius:12px;font-size:14px}.hero{padding:30px 24px;border:1px solid #50432b;border-radius:22px;background:linear-gradient(130deg,#211d28,#302719 65%,#17151d);margin:10px 0 22px;box-shadow:0 12px 40px #0003}.hero h1{margin:0 0 8px;font-size:clamp(24px,5vw,38px)}.muted{color:var(--muted)}.gold{color:var(--gold)}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:15px}.card{background:linear-gradient(160deg,#1b1b24,#14141b);border:1px solid var(--line);border-radius:18px;padding:13px;overflow:hidden;box-shadow:0 8px 24px #0002}.pic{width:100%;height:200px;object-fit:cover;border-radius:13px;background:#252530}.price{font-size:20px;font-weight:850;color:var(--gold2)}.old{text-decoration:line-through;color:#8d8994;font-size:14px;margin-left:7px}.btn,button{border:0;display:inline-flex;align-items:center;justify-content:center;gap:6px;background:linear-gradient(135deg,var(--gold2),var(--gold));color:#1b1710;padding:11px 15px;border-radius:12px;font-weight:800;cursor:pointer;font-family:inherit}.btn2{background:#292934;color:white;border:1px solid #41414c}.danger{background:#47252a;color:#fff}.form{display:grid;gap:12px;max-width:720px}.input,select,textarea{width:100%;padding:12px;border-radius:11px;border:1px solid #3b3b47;background:#101017;color:#fff;font:inherit}.row{display:flex;gap:9px;flex-wrap:wrap;align-items:center}.tag{display:inline-block;padding:5px 9px;border-radius:99px;background:#30291e;color:var(--gold2);font-size:12px;border:1px solid #55452b}.table{width:100%;border-collapse:collapse;background:#14141b;border-radius:12px;overflow:hidden}.table td,.table th{padding:10px;border-bottom:1px solid #30303b;text-align:left;vertical-align:top}.flash{padding:12px;border-radius:12px;background:#243329;border:1px solid #35523d;margin:10px 0}.footer{padding:28px 12px;text-align:center;color:var(--muted)}.small{font-size:13px}.video{width:100%;max-height:360px;border-radius:16px;margin:14px 0}.search{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;margin:14px 0 20px}.stat{flex:1;min-width:130px}.stat strong{font-size:24px;color:var(--gold)}.thumb{width:64px;height:64px;object-fit:cover;border-radius:9px}.wide{width:100%}.empty{text-align:center;padding:32px;border:1px dashed #41414b;border-radius:18px;color:var(--muted)}
 @media(max-width:700px){.wrap{padding:11px}.search{grid-template-columns:1fr}.pic{height:165px}.brand{font-size:22px}.table{font-size:12px;display:block;overflow-x:auto;white-space:nowrap}.hero{padding:22px 16px}.links a{padding:8px 10px}.card{padding:10px}}
-</style></head><body><div class="wrap"><nav class="nav"><a class="brand" href="/">NEXVORA</a><div class="links"><a href="/">🏠 Асосӣ</a><a href="/favorites">❤️</a><a href="/cart">🛒 Корзина ({{ cart_count }})</a><a href="/track">📦 Пайгирӣ</a><a href="/admin">⚙️ Admin</a></div></nav>
-{% with messages=get_flashed_messages() %}{% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}{{ body|safe }}<footer class="footer">© {{ year }} NEXVORA STORE · Хариди онлайн осон ва қулай</footer></div></body></html>'''
+</style></head><body><div class="wrap"><nav class="nav"><a class="brand" href="/">NEXVORA</a><div class="links"><a href="/">🏠 Асосӣ</a><a href="/favorites">❤️</a><a href="/cart">🛒 Корзина ({{ cart_count }})</a><a href="/track">📦 Пайгирӣ</a><a href="/admin">⚙️ Admin</a></div></nav>{% with messages=get_flashed_messages() %}{% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}{{ body|safe }}<footer class="footer">© {{ year }} NEXVORA STORE · Хариди онлайн осон ва қулай</footer></div></body></html>'''
 
 def page(title, body, **kwargs):
-    count = sum(int(v) for v in session.get('cart', {}).values())
+    count = sum(int(v) for v in session.get('cart', {}).values() if str(v).isdigit())
     return render_template_string(BASE, title=title, body=body, cart_count=count, year=datetime.now().year, **kwargs)
 
-# ===================== SHOP PAGES =====================
+# ===================== SHOP =====================
 @app.route('/')
 def home():
     q=request.args.get('q','').strip(); category=request.args.get('category',''); sort=request.args.get('sort','new')
@@ -146,10 +163,7 @@ def home():
     with db() as con:
         rows=con.execute(sql,args).fetchall(); cats=con.execute('SELECT DISTINCT category FROM products WHERE active=1 ORDER BY category').fetchall()
     products=[p_dict(r) for r in rows]
-    body=render_template_string('''<section class="hero"><h1>{{ banner }}</h1><p class="muted">Маҳсулоти нав · Нархи хуб · Фармоиши осон</p><div class="row"><span class="tag">✨ Нав</span><span class="tag">🔥 Аксия</span><span class="tag">⭐ Тавсия</span></div></section>
-    {% if video %}<video class="video" controls muted loop src="/uploads/{{ video }}"></video>{% endif %}
-    <form class="search"><input class="input" name="q" value="{{ q }}" placeholder="🔎 Ҷустуҷӯи маҳсулот..."><select name="category"><option value="">Ҳама категорияҳо</option>{% for c in cats %}<option value="{{ c.category }}" {% if category==c.category %}selected{% endif %}>{{ c.category }}</option>{% endfor %}</select><select name="sort"><option value="new">Навтарин</option><option value="cheap" {% if sort=='cheap' %}selected{% endif %}>Арзонтарин</option><option value="expensive" {% if sort=='expensive' %}selected{% endif %}>Қиматтарин</option></select><button>Ҷустуҷӯ</button></form>
-    <div class="grid">{% for p in products %}<article class="card"><a href="/product/{{ p.id }}">{% if p.images %}<img class="pic" src="/uploads/{{ p.images[0] }}" alt="{{ p.name }}">{% else %}<div class="pic"></div>{% endif %}</a>{% if p.featured %}<span class="tag">⭐ Тавсия</span>{% endif %}<h3>{{ p.name }}</h3><p class="muted small">{{ p.category }}</p><div class="price">{{ '%.2f'|format(p.price) }} сомонӣ{% if p.old_price and p.old_price>p.price %}<span class="old">{{ '%.2f'|format(p.old_price) }}</span>{% endif %}</div><p class="small muted">{% if p.stock>0 %}📦 Дар анбор: {{ p.stock }}{% else %}Нест{% endif %}</p><div class="row"><a class="btn" href="/product/{{ p.id }}">Дидан</a>{% if p.stock>0 %}<form method="post" action="/cart/add/{{ p.id }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>🛒</button></form>{% endif %}</div></article>{% endfor %}</div>{% if not products %}<div class="empty">Маҳсулот ёфт нашуд. Ҷустуҷӯи дигарро санҷед.</div>{% endif %}''', banner=setting('banner','NEXVORA STORE'),video=setting('video_ad',''),q=q,category=category,sort=sort,cats=cats,products=products)
+    body=render_template_string('''<section class="hero"><h1>{{ banner }}</h1><p class="muted">Маҳсулоти нав · Нархи хуб · Фармоиши осон</p><div class="row"><span class="tag">✨ Нав</span><span class="tag">🔥 Аксия</span><span class="tag">⭐ Тавсия</span></div></section>{% if video %}<video class="video" controls muted loop src="/uploads/{{ video }}"></video>{% endif %}<form class="search"><input class="input" name="q" value="{{ q }}" placeholder="🔎 Ҷустуҷӯи маҳсулот..."><select name="category"><option value="">Ҳама категорияҳо</option>{% for c in cats %}<option value="{{ c.category }}" {% if category==c.category %}selected{% endif %}>{{ c.category }}</option>{% endfor %}</select><select name="sort"><option value="new">Навтарин</option><option value="cheap" {% if sort=='cheap' %}selected{% endif %}>Арзонтарин</option><option value="expensive" {% if sort=='expensive' %}selected{% endif %}>Қиматтарин</option></select><button>Ҷустуҷӯ</button></form><div class="grid">{% for p in products %}<article class="card"><a href="/product/{{ p.id }}">{% if p.images %}<img class="pic" src="/uploads/{{ p.images[0] }}" alt="{{ p.name }}">{% else %}<div class="pic"></div>{% endif %}</a>{% if p.featured %}<span class="tag">⭐ Тавсия</span>{% endif %}<h3>{{ p.name }}</h3><p class="muted small">{{ p.category }}</p><div class="price">{{ '%.2f'|format(p.price) }} сомонӣ{% if p.old_price and p.old_price>p.price %}<span class="old">{{ '%.2f'|format(p.old_price) }}</span>{% endif %}</div><p class="small muted">{% if p.stock>0 %}📦 Дар анбор: {{ p.stock }}{% else %}Нест{% endif %}</p><div class="row"><a class="btn" href="/product/{{ p.id }}">Дидан</a>{% if p.stock>0 %}<form method="post" action="/cart/add/{{ p.id }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button>🛒</button></form>{% endif %}</div></article>{% endfor %}</div>{% if not products %}<div class="empty">Маҳсулот ёфт нашуд.</div>{% endif %}''', banner=setting('banner','NEXVORA STORE'),video=setting('video_ad',''),q=q,category=category,sort=sort,cats=cats,products=products)
     return page('Асосӣ',body)
 
 @app.route('/product/<int:pid>')
@@ -163,7 +177,7 @@ def product(pid):
 @app.post('/cart/add/<int:pid>')
 def cart_add(pid):
     with db() as con: p=con.execute('SELECT id,stock,active FROM products WHERE id=?',(pid,)).fetchone()
-    if not p or not p['active'] or p['stock']<1: flash('Ин маҳсулот ҳоло дастрас нест.')
+    if not p or not p['active'] or p['stock']<1: flash('Ин маҳсулот дастрас нест.')
     else:
         cart=session.get('cart',{}); cart[str(pid)]=min(int(cart.get(str(pid),0))+1,int(p['stock'])); session['cart']=cart; flash('Ба корзина илова шуд!')
     return redirect(request.referrer or '/')
@@ -188,14 +202,12 @@ def favorites():
 
 @app.post('/favorite/<int:pid>')
 def favorite(pid):
-    with db() as con:
-        exists=con.execute('SELECT id FROM products WHERE id=? AND active=1',(pid,)).fetchone()
+    with db() as con: exists=con.execute('SELECT id FROM products WHERE id=? AND active=1',(pid,)).fetchone()
     if not exists: abort(404)
     fav=session.get('favorites',[]); key=str(pid)
     if key in fav: fav.remove(key)
     else: fav.append(key)
-    session['favorites']=fav
-    return redirect(request.referrer or '/')
+    session['favorites']=fav; return redirect(request.referrer or '/')
 
 @app.route('/checkout',methods=['GET','POST'])
 def checkout():
@@ -210,10 +222,8 @@ def checkout():
         name=request.form.get('name','').strip(); phone=request.form.get('phone','').strip(); address=request.form.get('address','').strip()
         if not name or not phone or not address: flash('Ҳама маълумотро пур кунед.')
         else:
-            oid=uuid.uuid4().hex[:10].upper()
-            order_items=[{'product_id':p['id'],'name':p['name'],'qty':p['qty'],'price':p['price']} for p in items]
+            oid=uuid.uuid4().hex[:10].upper(); order_items=[{'product_id':p['id'],'name':p['name'],'qty':p['qty'],'price':p['price']} for p in items]
             with db() as con:
-                # Verify stock before deducting, within the same transaction.
                 for p in items:
                     cur=con.execute('SELECT stock,active FROM products WHERE id=?',(p['id'],)).fetchone()
                     if not cur or not cur['active'] or cur['stock']<p['qty']:
@@ -222,9 +232,9 @@ def checkout():
                 con.execute('INSERT INTO orders(id,customer,phone,address,items,subtotal,discount,delivery,total,promo) VALUES(?,?,?,?,?,?,?,?,?,?)',(oid,name,phone,address,json.dumps(order_items,ensure_ascii=False),subtotal,discount,delivery,total,promo))
             session['cart']={}; session.pop('promo',None)
             wa_num=(setting('whatsapp','').strip() or WHATSAPP_NUMBER).strip()
-            textmsg=f'Фармоиш №{oid}\nНом: {name}\nТелефон: {phone}\nАдрес: {address}\nҲамагӣ: {total:.2f} сомонӣ'
-            wa=f'https://wa.me/{wa_num}?text={quote(textmsg)}' if wa_num and 'X' not in wa_num else ''
-            body=render_template_string('''<section class="hero"><h1>✅ Фармоиш қабул шуд!</h1><h2>Код: <span class="gold">{{ oid }}</span></h2><p>Кодро нигоҳ доред, барои пайгирӣ лозим мешавад.</p><a class="btn" href="/track?id={{ oid }}">📦 Пайгирии фармоиш</a>{% if wa %}<p><a class="btn" href="{{ wa }}" target="_blank" rel="noopener">💬 Фиристодан ба WhatsApp</a></p>{% endif %}</section>''',oid=oid,wa=wa)
+            msg=f'Фармоиш №{oid}\nНом: {name}\nТелефон: {phone}\nАдрес: {address}\nҲамагӣ: {total:.2f} сомонӣ'
+            wa=f'https://wa.me/{wa_num}?text={quote(msg)}' if wa_num and wa_num.isdigit() else ''
+            body=render_template_string('''<section class="hero"><h1>✅ Фармоиш қабул шуд!</h1><h2>Код: <span class="gold">{{ oid }}</span></h2><p>Кодро нигоҳ доред.</p><a class="btn" href="/track?id={{ oid }}">📦 Пайгирӣ</a>{% if wa %}<p><a class="btn" href="{{ wa }}" target="_blank" rel="noopener">💬 WhatsApp</a></p>{% endif %}</section>''',oid=oid,wa=wa)
             return page('Фармоиш',body)
     body=render_template_string('''<h1>📦 Оформление</h1><div class="card"><p>Маҳсулот: {{ '%.2f'|format(subtotal) }} сомонӣ</p><p>Доставка: {{ delivery }} сомонӣ</p><p>Скидка: {{ '%.2f'|format(discount) }} сомонӣ</p><h2>Ҳамагӣ: <span class="gold">{{ '%.2f'|format(total) }} сомонӣ</span></h2></div><form method="post" class="form"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input class="input" name="name" placeholder="Номи шумо" required maxlength="100"><input class="input" name="phone" placeholder="Телефон" required maxlength="40"><textarea class="input" name="address" placeholder="Адрес / маҳалла" required maxlength="500"></textarea><button>✅ Фармоиш додан</button></form><form method="post" action="/promo" class="row" style="margin-top:14px"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input class="input" name="code" placeholder="Промокод"><button class="btn2">🏷️ Истифода</button></form>''',subtotal=subtotal,delivery=delivery,discount=discount,total=total)
     return page('Оформление',body)
@@ -246,15 +256,14 @@ def track():
     return page('Пайгирӣ',body)
 
 @app.route('/uploads/<path:filename>')
-def uploaded(filename):
-    return send_from_directory(UPLOAD_DIR,filename)
+def uploaded(filename): return send_from_directory(UPLOAD_DIR,filename)
 
 # ===================== ADMIN =====================
 @app.route('/admin',methods=['GET','POST'])
 def admin_login():
     if session.get('admin'): return redirect('/admin/dashboard')
     if request.method=='POST':
-        if hmac.compare_digest(request.form.get('password',''),ADMIN_PASSWORD):
+        if verify_admin_password(request.form.get('password','')):
             session.clear(); session['admin']=True; session['csrf']=secrets.token_hex(24); flash('Ба панели админ ворид шудед.'); return redirect('/admin/dashboard')
         flash('Парол нодуруст аст.')
     body='''<div class="hero"><h1>🔐 Admin Login</h1><p class="muted">Воридшавӣ ба идоракунии мағоза</p></div><form method="post" class="form"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input class="input" type="password" name="password" placeholder="Пароли админ" required><button>Ворид шудан</button></form>'''
@@ -262,18 +271,29 @@ def admin_login():
 
 @app.post('/admin/logout')
 @admin_required
-def admin_logout():
-    session.clear(); return redirect('/')
+def admin_logout(): session.clear(); return redirect('/')
+
+@app.route('/admin/password',methods=['GET','POST'])
+@admin_required
+def admin_password():
+    if request.method=='POST':
+        current=request.form.get('current',''); new=request.form.get('new',''); confirm=request.form.get('confirm','')
+        if not verify_admin_password(current): flash('Пароли ҳозира нодуруст аст.')
+        elif len(new)<10: flash('Пароли нав бояд камаш 10 аломат бошад.')
+        elif new!=confirm: flash('Паролҳо мувофиқат намекунанд.')
+        else:
+            set_setting('admin_password_hash',generate_password_hash(new)); flash('Парол иваз шуд! Пароли навро дар ҷои бехатар нигоҳ дор.'); return redirect('/admin/dashboard')
+    body='''<h1>🔐 Иваз кардани пароли Admin</h1><form method="post" class="form"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input class="input" type="password" name="current" placeholder="Пароли ҳозира" required><input class="input" type="password" name="new" placeholder="Пароли нав (камаш 10 аломат)" required minlength="10"><input class="input" type="password" name="confirm" placeholder="Пароли навро такрор кунед" required minlength="10"><button>Иваз кардани парол</button></form><p><a class="btn btn2" href="/admin/dashboard">← Бозгашт</a></p>'''
+    return page('Пароли Admin',body)
 
 @app.route('/admin/dashboard')
 @admin_required
 def dashboard():
     with db() as con:
-        products=con.execute('SELECT * FROM products ORDER BY id DESC').fetchall()
-        orders=con.execute('SELECT * FROM orders ORDER BY created_at DESC').fetchall()
+        products=con.execute('SELECT * FROM products ORDER BY id DESC').fetchall(); orders=con.execute('SELECT * FROM orders ORDER BY created_at DESC').fetchall()
         revenue=con.execute("SELECT COALESCE(SUM(total),0) s FROM orders WHERE status!='Бекор шуд'").fetchone()['s']
     ps=[p_dict(r) for r in products]
-    body=render_template_string('''<h1>⚙️ Панели идоракунӣ</h1><div class="row"><div class="card stat">Маҳсулот<br><strong>{{ ps|length }}</strong></div><div class="card stat">Фармоишҳо<br><strong>{{ orders|length }}</strong></div><div class="card stat">Фурӯш<br><strong>{{ '%.2f'|format(revenue) }}</strong> сомонӣ</div></div><div class="links" style="margin:14px 0"><a href="/admin/product/new">➕ Маҳсулот</a><a href="/admin/settings">🎨 Танзимот</a><a href="/admin/promos">🏷️ Промокод</a><a href="/admin/export">📥 CSV</a><form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="btn2">Баромад</button></form></div><h2>📦 Фармоишҳо</h2><table class="table"><tr><th>Код</th><th>Мизоҷ</th><th>Телефон</th><th>Ҳамагӣ</th><th>Статус</th><th>Идора</th></tr>{% for o in orders %}<tr><td>{{ o.id }}</td><td>{{ o.customer }}</td><td>{{ o.phone }}</td><td>{{ '%.2f'|format(o.total) }}</td><td>{{ o.status }}</td><td><form method="post" action="/admin/order/{{ o.id }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><select name="status"><option {% if o.status=='Қабул шуд' %}selected{% endif %}>Қабул шуд</option><option {% if o.status=='Дар роҳ' %}selected{% endif %}>Дар роҳ</option><option {% if o.status=='Расонида шуд' %}selected{% endif %}>Расонида шуд</option><option {% if o.status=='Бекор шуд' %}selected{% endif %}>Бекор шуд</option></select><button>OK</button></form></td></tr>{% endfor %}</table><h2>🛍️ Маҳсулот</h2><table class="table"><tr><th>Ном</th><th>Нарх</th><th>Анбор</th><th>Фаъол</th><th>Идора</th></tr>{% for p in ps %}<tr><td>{{ p.name }}</td><td>{{ p.price }}</td><td>{{ p.stock }}</td><td>{{ 'Бале' if p.active else 'Не' }}</td><td><a href="/admin/product/{{ p.id }}/edit">✏️</a> <form style="display:inline" method="post" action="/admin/product/{{ p.id }}/delete"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="danger">🗑</button></form></td></tr>{% endfor %}</table>''',ps=ps,orders=orders,revenue=revenue)
+    body=render_template_string('''<h1>⚙️ Панели идоракунӣ</h1><div class="row"><div class="card stat">Маҳсулот<br><strong>{{ ps|length }}</strong></div><div class="card stat">Фармоишҳо<br><strong>{{ orders|length }}</strong></div><div class="card stat">Фурӯш<br><strong>{{ '%.2f'|format(revenue) }}</strong> сомонӣ</div></div><div class="links" style="margin:14px 0"><a href="/admin/product/new">➕ Маҳсулот</a><a href="/admin/settings">🎨 Танзимот</a><a href="/admin/promos">🏷️ Промокод</a><a href="/admin/password">🔐 Иваз кардани парол</a><a href="/admin/export">📥 CSV</a><form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="btn2">Баромад</button></form></div><h2>📦 Фармоишҳо</h2><table class="table"><tr><th>Код</th><th>Мизоҷ</th><th>Телефон</th><th>Ҳамагӣ</th><th>Статус</th><th>Идора</th></tr>{% for o in orders %}<tr><td>{{ o.id }}</td><td>{{ o.customer }}</td><td>{{ o.phone }}</td><td>{{ '%.2f'|format(o.total) }}</td><td>{{ o.status }}</td><td><form method="post" action="/admin/order/{{ o.id }}"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><select name="status"><option {% if o.status=='Қабул шуд' %}selected{% endif %}>Қабул шуд</option><option {% if o.status=='Дар роҳ' %}selected{% endif %}>Дар роҳ</option><option {% if o.status=='Расонида шуд' %}selected{% endif %}>Расонида шуд</option><option {% if o.status=='Бекор шуд' %}selected{% endif %}>Бекор шуд</option></select><button>OK</button></form></td></tr>{% endfor %}</table><h2>🛍️ Маҳсулот</h2><table class="table"><tr><th>Ном</th><th>Нарх</th><th>Анбор</th><th>Фаъол</th><th>Идора</th></tr>{% for p in ps %}<tr><td>{{ p.name }}</td><td>{{ p.price }}</td><td>{{ p.stock }}</td><td>{{ 'Бале' if p.active else 'Не' }}</td><td><a href="/admin/product/{{ p.id }}/edit">✏️</a> <form style="display:inline" method="post" action="/admin/product/{{ p.id }}/delete"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="danger">🗑</button></form></td></tr>{% endfor %}</table>''',ps=ps,orders=orders,revenue=revenue)
     return page('Admin Dashboard',body)
 
 @app.route('/admin/product/new',methods=['GET','POST'])
@@ -297,8 +317,8 @@ def product_form(pid=None):
         with db() as con:
             if pid: con.execute('UPDATE products SET name=?,description=?,price=?,old_price=?,category=?,images=?,video=?,stock=?,featured=?,active=? WHERE id=?',(name,description,price,old_price,category,json.dumps(images),video,stock,featured,active,pid))
             else: con.execute('INSERT INTO products(name,description,price,old_price,category,images,video,stock,featured,active) VALUES(?,?,?,?,?,?,?,?,?,?)',(name,description,price,old_price,category,json.dumps(images),video,stock,featured,active))
-        flash('Маҳсулот бомуваффақият нигоҳ дошта шуд.'); return redirect('/admin/dashboard')
-    body=render_template_string('''<div class="hero"><h1>{{ '✏️ Таҳрири маҳсулот' if pid else '➕ Маҳсулоти нав' }}</h1></div><form method="post" enctype="multipart/form-data" class="form"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input class="input" name="name" placeholder="Номи маҳсулот" value="{{ p.name }}" required><textarea class="input" name="description" rows="4" placeholder="Тавсифи маҳсулот">{{ p.description }}</textarea><input class="input" name="category" placeholder="Категория" value="{{ p.category }}"><input class="input" type="number" step="0.01" min="0" name="price" placeholder="Нарх" value="{{ p.price }}" required><input class="input" type="number" step="0.01" min="0" name="old_price" placeholder="Нархи пешина" value="{{ p.old_price }}"><input class="input" type="number" min="0" name="stock" placeholder="Миқдор" value="{{ p.stock }}"><label>🖼️ Расмҳо (якчандто интихоб кунед)<input class="input" type="file" name="images" multiple accept="image/png,image/jpeg,image/webp,image/gif"></label>{% if p.images %}<div class="row">{% for im in p.images %}<img class="thumb" src="/uploads/{{ im }}">{% endfor %}</div>{% endif %}<label>🎥 Видео маҳсулот<input class="input" type="file" name="video" accept="video/mp4,video/webm"></label><label><input type="checkbox" name="featured" {% if p.featured %}checked{% endif %}> ⭐ Тавсияшаванда</label><label><input type="checkbox" name="active" {% if p.active %}checked{% endif %}> 👁️ Дар сайт нишон додан</label><button>💾 Сабт</button></form><p><a class="btn btn2" href="/admin/dashboard">← Бозгашт</a></p>''',p=p,pid=pid)
+        flash('Маҳсулот сабт шуд.'); return redirect('/admin/dashboard')
+    body=render_template_string('''<div class="hero"><h1>{{ '✏️ Таҳрири маҳсулот' if pid else '➕ Маҳсулоти нав' }}</h1></div><form method="post" enctype="multipart/form-data" class="form"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input class="input" name="name" placeholder="Номи маҳсулот" value="{{ p.name }}" required><textarea class="input" name="description" rows="4" placeholder="Тавсифи маҳсулот">{{ p.description }}</textarea><input class="input" name="category" placeholder="Категория" value="{{ p.category }}"><input class="input" type="number" step="0.01" min="0" name="price" placeholder="Нарх" value="{{ p.price }}" required><input class="input" type="number" step="0.01" min="0" name="old_price" placeholder="Нархи пешина" value="{{ p.old_price }}"><input class="input" type="number" min="0" name="stock" placeholder="Миқдор" value="{{ p.stock }}"><label>🖼️ Расмҳо<input class="input" type="file" name="images" multiple accept="image/png,image/jpeg,image/webp,image/gif"></label>{% if p.images %}<div class="row">{% for im in p.images %}<img class="thumb" src="/uploads/{{ im }}">{% endfor %}</div>{% endif %}<label>🎥 Видео<input class="input" type="file" name="video" accept="video/mp4,video/webm"></label><label><input type="checkbox" name="featured" {% if p.featured %}checked{% endif %}> ⭐ Тавсияшаванда</label><label><input type="checkbox" name="active" {% if p.active %}checked{% endif %}> 👁️ Дар сайт нишон додан</label><button>💾 Сабт</button></form><p><a class="btn btn2" href="/admin/dashboard">← Бозгашт</a></p>''',p=p,pid=pid)
     return page('Маҳсулот',body)
 
 @app.post('/admin/product/<int:pid>/delete')
@@ -323,8 +343,7 @@ def order_status(oid):
             for it in order_items:
                 if it.get('product_id'):
                     current=con.execute('SELECT stock FROM products WHERE id=?',(int(it['product_id']),)).fetchone()
-                    if not current or current['stock']<int(it.get('qty',0)):
-                        flash('Анбор барои барқарор кардани фармоиш кофӣ нест.'); return redirect('/admin/dashboard')
+                    if not current or current['stock']<int(it.get('qty',0)): flash('Анбор кофӣ нест.'); return redirect('/admin/dashboard')
             for it in order_items:
                 if it.get('product_id'): con.execute('UPDATE products SET stock=stock-? WHERE id=?',(int(it.get('qty',0)),int(it['product_id'])))
         con.execute('UPDATE orders SET status=? WHERE id=?',(status,oid))
@@ -336,11 +355,10 @@ def settings():
     if request.method=='POST':
         set_setting('banner',request.form.get('banner','').strip())
         set_setting('whatsapp',request.form.get('whatsapp','').strip().replace('+','').replace(' ',''))
-        video=save_upload(request.files.get('video'),True) or setting('video_ad','')
-        set_setting('video_ad',video)
+        video=save_upload(request.files.get('video'),True) or setting('video_ad',''); set_setting('video_ad',video)
         flash('Танзимот сабт шуд.'); return redirect('/admin/settings')
     wa=setting('whatsapp','').strip() or WHATSAPP_NUMBER
-    body=render_template_string('''<h1>🎨 Танзимоти сайт</h1><form method="post" enctype="multipart/form-data" class="form"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><label>Текст баннер<input class="input" name="banner" value="{{ banner }}"></label><label>WhatsApp рақам (992... бе +)<input class="input" name="whatsapp" value="{{ wa }}" placeholder="992XXXXXXXXX"></label><label>Видео-реклама<input class="input" type="file" name="video" accept="video/mp4,video/webm"></label><button>💾 Сабт кардан</button></form><p><a class="btn btn2" href="/admin/dashboard">← Бозгашт</a></p>''',banner=setting('banner',''),wa=wa)
+    body=render_template_string('''<h1>🎨 Танзимоти сайт</h1><form method="post" enctype="multipart/form-data" class="form"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><label>Текст баннер<input class="input" name="banner" value="{{ banner }}"></label><label>WhatsApp рақам<input class="input" name="whatsapp" value="{{ wa }}" placeholder="992XXXXXXXXX"></label><label>Видео-реклама<input class="input" type="file" name="video" accept="video/mp4,video/webm"></label><button>💾 Сабт</button></form><p><a class="btn btn2" href="/admin/dashboard">← Бозгашт</a></p>''',banner=setting('banner',''),wa=wa)
     return page('Танзимот',body)
 
 @app.route('/admin/promos',methods=['GET','POST'])
@@ -356,7 +374,7 @@ def promos():
         else: flash('Код ва скидкаи дурустро ворид кунед.')
         return redirect('/admin/promos')
     with db() as con: rows=con.execute('SELECT * FROM promos ORDER BY code').fetchall()
-    body=render_template_string('''<h1>🏷️ Промокодҳо</h1><form class="row" method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input class="input" name="code" placeholder="Код, мисол SALE10" required><input class="input" name="discount" type="number" min="0.01" step="0.01" placeholder="Скидка (сомонӣ)" required><button>➕ Илова</button></form><table class="table"><tr><th>Код</th><th>Скидка</th><th>Фаъол</th></tr>{% for r in rows %}<tr><td>{{ r.code }}</td><td>{{ r.discount }} сомонӣ</td><td>{{ 'Бале' if r.active else 'Не' }}</td></tr>{% endfor %}</table><p><a class="btn btn2" href="/admin/dashboard">Бозгашт</a></p>''',rows=rows)
+    body=render_template_string('''<h1>🏷️ Промокодҳо</h1><form class="row" method="post"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input class="input" name="code" placeholder="Код" required><input class="input" name="discount" type="number" min="0.01" step="0.01" placeholder="Скидка (сомонӣ)" required><button>➕ Илова</button></form><table class="table"><tr><th>Код</th><th>Скидка</th><th>Фаъол</th></tr>{% for r in rows %}<tr><td>{{ r.code }}</td><td>{{ r.discount }} сомонӣ</td><td>{{ 'Бале' if r.active else 'Не' }}</td></tr>{% endfor %}</table><p><a class="btn btn2" href="/admin/dashboard">Бозгашт</a></p>''',rows=rows)
     return page('Promos',body)
 
 @app.route('/admin/export')
