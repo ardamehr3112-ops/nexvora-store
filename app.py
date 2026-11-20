@@ -15,7 +15,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
 # CONFIG: WhatsApp number should be international format, digits only, e.g. 992XXXXXXXXX
 WHATSAPP_NUMBER = os.environ.get('WHATSAPP_NUMBER', '992919186336')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Jurabekjon123')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Jurabekjon123.')
 DELIVERY_FEE = max(0, int(os.environ.get('DELIVERY_FEE', '0')))
 DATA_DIR = os.environ.get('DATA_DIR', os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(DATA_DIR, 'uploads')
