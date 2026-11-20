@@ -12,7 +12,7 @@ from functools import wraps
 from urllib.parse import quote
 import sqlite3, os, re, secrets, hmac, uuid
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "CHANGE_THIS_TO_A_RANDOM_SECRET")
+SECRET_KEY = os.environ.get("SECRET_KEY", "1858928418589284Jurajurajurajon123.")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Jurabekjon123.")
 WHATSAPP_NUMBER = os.environ.get("WHATSAPP_NUMBER", "992111301210")
 STORE_NAME = "NEXVORA"
