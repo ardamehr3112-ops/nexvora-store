@@ -1,289 +1,685 @@
-from flask import Flask, request, redirect, render_template_string, session, flash, abort, jsonify, Response, make_response
+from flask import Flask, request, redirect, url_for, session, flash, render_template_string, send_from_directory, abort, Response
+import sqlite3, os, uuid, secrets, json, csv, io
+from werkzeug.utils import secure_filename
+from werkzeug.security import check_password_hash
+from functools import wraps
+from urllib.parse import quote
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.config['MAX_CONTENT_LENGTH'] = 120 * 1024 * 1024
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Jurabekjon123.from flask import Flask, request, redirect, url_for, session, flash, render_template_string, send_from_directory, abort
+import sqlite3, os, uuid, secrets, json, re
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
-import os,json,uuid,sqlite3,secrets,hmac,csv,io
-from pathlib import Path
-from urllib.parse import quote
+from functools import wraps
 from datetime import datetime
+from urllib.parse import quote
 
-app=Flask(__name__); app.secret_key=os.environ.get('SECRET_KEY') or secrets.token_hex(32)
-app.config.update(MAX_CONTENT_LENGTH=80*1024*1024,SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax')
-BASE=Path(__file__).resolve().parent; UP=BASE/'static'/'uploads'; UP.mkdir(parents=True,exist_ok=True); DB=BASE/'nexvora_pro.db'; JSON_FILE=BASE/'products.json'
-PHONE=''.join(c for c in os.environ.get('WHATSAPP_NUMBER','992919186336') if c.isdigit()); ADMIN=os.environ.get('ADMIN_PASSWORD','jura2010')
-IMG={'jpg','jpeg','png','webp','gif'}; VID={'mp4','webm'}; LANGS={'tg','ru','en'}
-T={
-'tg':{'shop':'Мағоза','search':'Ҷустуҷӯ','cart':'Сабад','fav':'Дӯстдоштаҳо','compare':'Муқоиса','track':'Пайгирӣ','admin':'Admin','add':'Илова кардан','buy':'Харидан','price':'Нарх','category':'Категория','desc':'Тавсиф','stock':'Анбор','empty':'Маҳсулот нест','checkout':'Фармоиш','name':'Ном','phone':'Телефон','address':'Суроға','note':'Эзоҳ','send':'Фиристодан','promo':'Промокод','apply':'Истифода','total':'Ҳамагӣ','review':'Шарҳ','question':'Савол','cash':'Нақдӣ','status':'Ҳолат','all':'Ҳама','remove':'Нест кардан','orderok':'Фармоиш қабул шуд','added':'Ба сабад илова шуд'},
-'ru':{'shop':'Магазин','search':'Поиск','cart':'Корзина','fav':'Избранное','compare':'Сравнение','track':'Отслеживание','admin':'Admin','add':'Добавить','buy':'Купить','price':'Цена','category':'Категория','desc':'Описание','stock':'Остаток','empty':'Товаров нет','checkout':'Оформление','name':'Имя','phone':'Телефон','address':'Адрес','note':'Примечание','send':'Отправить','promo':'Промокод','apply':'Применить','total':'Итого','review':'Отзыв','question':'Вопрос','cash':'Наличные','status':'Статус','all':'Все','remove':'Удалить','orderok':'Заказ принят','added':'Добавлено в корзину'},
-'en':{'shop':'Shop','search':'Search','cart':'Cart','fav':'Favorites','compare':'Compare','track':'Tracking','admin':'Admin','add':'Add','buy':'Buy','price':'Price','category':'Category','desc':'Description','stock':'Stock','empty':'No products','checkout':'Checkout','name':'Name','phone':'Phone','address':'Address','note':'Note','send':'Send','promo':'Promo code','apply':'Apply','total':'Total','review':'Review','question':'Question','cash':'Cash','status':'Status','all':'All','remove':'Remove','orderok':'Order accepted','added':'Added to cart'}}
-def t(k):return T.get(session.get('lang','tg'),T['tg']).get(k,k)
-app.jinja_env.globals['t']=t
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.config['MAX_CONTENT_LENGTH'] = 120 * 1024 * 1024
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'Jurabekjon123.')
+WHATSAPP_NUMBER = os.environ.get('WHATSAPP_NUMBER', '992111301210')
+DELIVERY_FEE = int(os.environ.get('DELIVERY_FEE', '0'))
+DATA = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data'))
+UPLOADS = os.path.join(DATA, 'uploads')
+DB = os.path.join(DATA, 'nexvora.db')
+os.makedirs(UPLOADS, exist_ok=True)
+
+# If upgrading from V4, copy old static uploads into persistent storage once.
+OLD_UPLOADS = os.path.join(os.path.dirname(__file__), 'static', 'uploads')
+if os.path.isdir(OLD_UPLOADS):
+    for fn in os.listdir(OLD_UPLOADS):
+        src, dst = os.path.join(OLD_UPLOADS, fn), os.path.join(UPLOADS, fn)
+        if os.path.isfile(src) and not os.path.exists(dst):
+            try:
+                import shutil; shutil.copy2(src, dst)
+            except Exception: pass
+
+ALLOWED_IMAGES = {'jpg','jpeg','png','webp'}
+ALLOWED_VIDEOS = {'mp4','webm'}
+def ext_ok(name, allowed): return '.' in name and name.rsplit('.',1)[1].lower() in allowed
+def media_save(file, allowed):
+    if not file or not file.filename: return ''
+    if not ext_ok(file.filename, allowed): return ''
+    ext = file.filename.rsplit('.',1)[1].lower()
+    name = uuid.uuid4().hex + '.' + ext
+    file.save(os.path.join(UPLOADS, name))
+    return name
 
 def db():
- c=sqlite3.connect(DB,timeout=25);c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
-with db() as c:
- c.executescript('''CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY,name TEXT,price REAL,old_price REAL DEFAULT 0,sale_price REAL DEFAULT 0,category TEXT,description TEXT,images TEXT DEFAULT '[]',video TEXT DEFAULT '',stock INTEGER DEFAULT 0,featured INTEGER DEFAULT 0,active INTEGER DEFAULT 1,scheduled TEXT DEFAULT '',seller TEXT DEFAULT 'NEXVORA',created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY,customer TEXT,phone TEXT,address TEXT,note TEXT,items TEXT,subtotal REAL,discount REAL DEFAULT 0,delivery REAL DEFAULT 0,total REAL,promo TEXT DEFAULT '',payment TEXT DEFAULT 'cash',status TEXT DEFAULT 'Қабул шуд',created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS promos(code TEXT PRIMARY KEY,discount REAL,kind TEXT DEFAULT 'amount',active INTEGER DEFAULT 1);
- CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY,product_id INTEGER,customer TEXT,stars INTEGER,body TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS questions(id INTEGER PRIMARY KEY,product_id INTEGER,customer TEXT,body TEXT,answer TEXT DEFAULT '',created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY,product_id INTEGER,customer TEXT,stars INTEGER,body TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
- CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY,action TEXT,detail TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS giftcards(code TEXT PRIMARY KEY,amount REAL,remaining REAL,active INTEGER DEFAULT 1);
- CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,phone TEXT UNIQUE,password_hash TEXT,points INTEGER DEFAULT 0,referral TEXT UNIQUE);
- CREATE TABLE IF NOT EXISTS sellers(id INTEGER PRIMARY KEY,name TEXT,phone TEXT UNIQUE,description TEXT DEFAULT '',active INTEGER DEFAULT 1);''')
- for k,v in {'banner':'NEXVORA — Хариди осон','delivery':'0','flash_percent':'0','flash_until':'','ref_bonus':'10'}.items():c.execute('INSERT OR IGNORE INTO settings VALUES(?,?)',(k,v))
- # Import legacy JSON products, without duplicating on each startup
- if JSON_FILE.exists() and c.execute('select count(*) from products').fetchone()[0]==0:
-  try:
-   for p in json.loads(JSON_FILE.read_text(encoding='utf-8')):c.execute('INSERT INTO products(name,price,images,category,stock) VALUES(?,?,?,?,?)',(p.get('name',''),float(p.get('price',0)),json.dumps([p['image']] if p.get('image') else []),p.get('category','Дигар'),int(p.get('stock',99))))
-  except Exception:pass
+    c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
 
-def setting(k,default=''):
- with db() as c:r=c.execute('select value from settings where key=?',(k,)).fetchone();return r['value'] if r else default
-def log(a,d=''):
- with db() as c:c.execute('insert into logs(action,detail) values(?,?)',(a,str(d)[:400]))
-def csrf():
- if 'csrf' not in session:session['csrf']=secrets.token_hex(24)
- return session['csrf']
-app.jinja_env.globals['csrf']=csrf
+def init_db():
+    c=db(); q=c.cursor()
+    q.execute('''CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,price REAL NOT NULL,image TEXT DEFAULT '',category TEXT DEFAULT 'Дигар',description TEXT DEFAULT '',stock INTEGER DEFAULT 0,sale_price REAL DEFAULT 0,featured INTEGER DEFAULT 0,active INTEGER DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP,video TEXT DEFAULT '')''')
+    q.execute('''CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,customer_name TEXT,phone TEXT,address TEXT,note TEXT,items_json TEXT,total REAL,status TEXT DEFAULT 'Нав',created_at TEXT DEFAULT CURRENT_TIMESTAMP,discount REAL DEFAULT 0,promo TEXT DEFAULT '',delivery_fee REAL DEFAULT 0,stock_restored INTEGER DEFAULT 0)''')
+    q.execute('CREATE TABLE IF NOT EXISTS promos(code TEXT PRIMARY KEY,discount REAL,active INTEGER DEFAULT 1)')
+    q.execute('CREATE TABLE IF NOT EXISTS product_images(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id INTEGER,filename TEXT,position INTEGER DEFAULT 0)')
+    q.execute('CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id INTEGER,name TEXT,rating INTEGER,comment TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)')
+    q.execute('CREATE TABLE IF NOT EXISTS hits(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)')
+    # V4-compatible migrations
+    for table,col,definition in [('products','video',"TEXT DEFAULT ''"),('orders','discount','REAL DEFAULT 0'),('orders','promo',"TEXT DEFAULT ''"),('orders','delivery_fee','REAL DEFAULT 0'),('orders','stock_restored','INTEGER DEFAULT 0')]:
+        cols=[r['name'] for r in q.execute(f'PRAGMA table_info({table})')]
+        if col not in cols: q.execute(f'ALTER TABLE {table} ADD COLUMN {col} {definition}')
+    # import old single image into gallery when gallery is empty for that product
+    for p in q.execute('SELECT id,image FROM products').fetchall():
+        if p['image'] and not q.execute('SELECT 1 FROM product_images WHERE product_id=? LIMIT 1',(p['id'],)).fetchone():
+            q.execute('INSERT INTO product_images(product_id,filename,position) VALUES(?,?,0)',(p['id'],p['image']))
+    c.commit(); c.close()
+init_db()
+
 @app.before_request
-def csrf_guard():
- if request.method=='POST' and request.form.get('csrf')!=session.get('csrf'):abort(400,'CSRF token invalid')
-def adminok():return bool(session.get('admin'))
-def ext(f):return f.filename.rsplit('.',1)[-1].lower() if f and '.' in f.filename else ''
-def uploads(files,allowed):
- saved=[]
- for f in files:
-  if f and f.filename and ext(f) in allowed:
-   name=uuid.uuid4().hex+'.'+ext(f);f.save(UP/name);saved.append(name)
- return saved
-def product(pid):
- with db() as c:r=c.execute('select * from products where id=? and active=1',(pid,)).fetchone();return dict(r) if r else None
-def products():
- with db() as c:return [dict(r) for r in c.execute("select * from products where active=1 and (scheduled='' or scheduled<=datetime('now')) order by featured desc,id desc")]
-def imgs(p):
- try:return json.loads(p.get('images') or '[]')
- except:return []
-def effective(p):return float(p.get('sale_price') or p.get('price') or 0)
-def money(x):return ('%.2f'%float(x)).rstrip('0').rstrip('.')
-def cart():return session.setdefault('cart',{})
-def cart_rows():
- rows=[];total=0
- for k,q in cart().items():
-  p=product(int(k))
-  if p:
-   q=max(1,min(int(q),max(1,int(p['stock'] or 99))));rows.append((p,q,effective(p)*q));total+=effective(p)*q
- return rows,total
-def viewed():return [p for i in session.get('viewed',[]) if (p:=product(i))]
+def csrf():
+    if 'csrf' not in session: session['csrf']=secrets.token_hex(16)
+def token_field(): return f'<input type="hidden" name="csrf" value="{session.get("csrf","")}">' 
+def valid_csrf(): return secrets.compare_digest(request.form.get('csrf',''),session.get('csrf',''))
 
-def card(p):
- im=imgs(p);src=('/static/uploads/'+im[0]) if im else ''
- return render_template_string('''<article class=card><a href=/p/{{p.id}}>{% if src %}<img src="{{src}}" loading=lazy>{% else %}<div class=placeholder>NEXVORA</div>{% endif %}</a><h3>{{p.name}}</h3><small>{{p.category}} · 📦 {{p.stock}}</small><p class=price>{{price}} сомонӣ</p>{% if p.old_price %}<del>{{p.old_price}}</del>{% endif %}<div class=row><a class=btn href=/p/{{p.id}}>👁 Quick view</a><form method=post action=/cart/add/{{p.id}}><input type=hidden name=csrf value={{csrf()}}><button class=btn green>{{t('buy')}}</button></form><a class=btn href=/fav/{{p.id}}>♡</a><a class=btn href=/compare/add/{{p.id}}>⚖</a></div></article>''',p=p,src=src,price=money(effective(p)))
-BASEHTML='''<!doctype html><html lang="{{session.get('lang','tg')}}"><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=theme-color content=#0b0b0c><link rel=manifest href=/manifest.json><title>{{title}}</title><style>*{box-sizing:border-box}body{margin:0;background:#09090b;color:#f6f6f6;font-family:Arial}a{color:inherit;text-decoration:none}header{position:sticky;top:0;background:#121216ee;border-bottom:1px solid #393434;z-index:4}.nav{max-width:1100px;margin:auto;padding:12px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.logo{font-size:22px;font-weight:bold;letter-spacing:3px;color:#e8c958}.links{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.links a,.btn{display:inline-block;padding:9px 11px;border-radius:9px;background:#242429;border:1px solid #444}.wrap{max-width:1100px;margin:auto;padding:14px}.hero,.panel,.card{background:#19191d;border:1px solid #4b4230;border-radius:15px;padding:15px;margin:12px 0}.hero{text-align:center;background:linear-gradient(120deg,#18181b,#292317)}h1{color:#e8c958}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.card img{width:100%;height:210px;object-fit:contain;background:#0e0e10;border-radius:10px}.placeholder{height:210px;display:grid;place-items:center;color:#888}.price{color:#e8c958;font-size:20px;font-weight:bold}.old{color:#999;text-decoration:line-through}.input,select,textarea{width:100%;background:#101014;color:white;border:1px solid #444;border-radius:9px;padding:12px;margin:6px 0}.btn{cursor:pointer;background:#e8c958;color:#111;font-weight:bold;border:0}.green{background:#198a4a;color:white}.red{background:#a33;color:white}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row form{margin:0}.thumbs{display:flex;gap:6px;overflow:auto}.thumbs img{width:70px;height:70px;object-fit:cover;border-radius:8px}.flash{background:#393022;padding:12px;border-radius:9px;margin:8px 0}video{width:100%;max-height:420px;border-radius:12px}footer{text-align:center;color:#777;padding:30px}.small{color:#aaa;font-size:13px}.stars{color:#f5d55e}@media(max-width:500px){.links{gap:3px}.links a{padding:7px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card img{height:150px}.logo{font-size:18px}} </style></head><body><header><div class=nav><a class=logo href=/>NEXVORA</a><div class=links><a href=/>{{t('shop')}}</a><a href=/cart>{{t('cart')}} ({{cartcount}})</a><a href=/favorites>{{t('fav')}}</a><a href=/compare>{{t('compare')}}</a><a href=/track>{{t('track')}}</a><a href=/admin>{{t('admin')}}</a><form method=post action=/lang style="margin:0"><input type=hidden name=csrf value={{csrf()}}><select name=lang onchange=this.form.submit() style="width:auto;margin:0;padding:7px"><option value=tg {% if session.get('lang','tg')=='tg' %}selected{% endif %}>🇹🇯 TG</option><option value=ru {% if session.get('lang')=='ru' %}selected{% endif %}>🇷🇺 RU</option><option value=en {% if session.get('lang')=='en' %}selected{% endif %}>🇬🇧 EN</option></select></form></div></div></header><main class=wrap>{% for m in get_flashed_messages() %}<div class=flash>{{m}}</div>{% endfor %}{{body|safe}}</main><footer>NEXVORA STORE · 2026</footer><script>if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js');function voice(){let R=window.SpeechRecognition||window.webkitSpeechRecognition;if(!R){alert('Voice search unsupported');return}let r=new R();r.lang=document.documentElement.lang==='ru'?'ru-RU':document.documentElement.lang==='en'?'en-US':'tg-TJ';r.onresult=e=>{document.querySelector('#q').value=e.results[0][0].transcript;document.querySelector('#search').submit()};r.start()}</script></body></html>'''
-def page(body,title='NEXVORA',**kw):return render_template_string(BASEHTML,body=body,title=title,cartcount=sum(int(v) for v in cart().values()),**kw)
-@app.post('/lang')
-def lang():session['lang']=request.form.get('lang') if request.form.get('lang') in LANGS else 'tg';return redirect(request.referrer or '/')
-LANGS=('tg','ru','en')
+@app.before_request
+def hit():
+    if request.endpoint=='home':
+        try:
+            c=db(); c.execute('INSERT INTO hits DEFAULT VALUES'); c.commit(); c.close()
+        except: pass
+
+def admin_required(f):
+    @wraps(f)
+    def inner(*a,**kw):
+        if not session.get('admin'): return redirect(url_for('login'))
+        return f(*a,**kw)
+    return inner
+
+def money(v): return f'{float(v or 0):,.0f}'
+def get_images(pid):
+    c=db(); rows=c.execute('SELECT filename FROM product_images WHERE product_id=? ORDER BY position,id',(pid,)).fetchall(); c.close()
+    return [r['filename'] for r in rows]
+def get_product(pid):
+    c=db(); p=c.execute('SELECT * FROM products WHERE id=?',(pid,)).fetchone(); c.close(); return p
+
+def current_price(p): return float(p['sale_price'] or p['price'])
+def cart_items():
+    cart=session.get('cart',{}); items=[]; total=0
+    c=db()
+    for pid,qty in cart.items():
+        p=c.execute('SELECT * FROM products WHERE id=? AND active=1',(pid,)).fetchone()
+        if p and int(qty)>0:
+            price=current_price(p); sub=price*int(qty); total+=sub
+            items.append({'product':p,'qty':int(qty),'price':price,'subtotal':sub})
+    c.close(); return items,total
+
+BASE_STYLE='''<style>*{box-sizing:border-box}body{margin:0;background:#090909;color:#eee;font-family:Arial,sans-serif}a{color:#e6c15a;text-decoration:none}header{padding:16px 5%;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #3b321c;gap:12px;flex-wrap:wrap}.brand{font-size:24px;font-weight:900;color:#e6c15a;letter-spacing:2px}.nav{display:flex;gap:14px;flex-wrap:wrap}main{max-width:1150px;margin:auto;padding:22px 4%}.gold{color:#e6c15a}input,textarea,select,button{padding:11px;border-radius:8px;border:1px solid #55451e;background:#151515;color:#eee;max-width:100%}button,.btn{background:#c7a347;color:#111;font-weight:bold;border:0;padding:11px 15px;border-radius:8px;cursor:pointer;display:inline-block}.card{border:1px solid #332b19;background:#111;border-radius:13px;padding:14px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}.product img{width:100%;height:220px;object-fit:cover;border-radius:9px}.price{font-size:19px;color:#e6c15a;font-weight:bold}.muted{color:#aaa;font-size:13px}.formrow{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.formrow>*{flex:1}.wide{width:100%}table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #333;text-align:left}video{width:100%;max-height:400px;border-radius:10px}.gallery{display:flex;gap:8px;overflow:auto}.gallery img{width:110px;height:100px;object-fit:cover;border-radius:8px}.alert{padding:10px;background:#332715;border-radius:8px;margin:10px 0}.footer{padding:25px;text-align:center;color:#999}@media(max-width:600px){header{padding:13px}.brand{font-size:20px}main{padding:15px 3%}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.product img{height:150px}.card{padding:10px}.nav{font-size:13px;gap:9px}input,select,textarea{width:100%}}''' 
+
+def page(title,body):
+    return render_template_string('''<!doctype html><html lang="tg"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{title}} | NEXVORA</title>'''+BASE_STYLE+'''<header><a class="brand" href="{{url_for('home')}}">NEXVORA</a><nav class="nav"><a href="{{url_for('home')}}">Магазин</a><a href="{{url_for('cart')}}">🛒 Сабад</a><a href="{{url_for('favorites')}}">❤️ Дӯстдошта</a><a href="{{url_for('track')}}">📦 Tracking</a><a href="{{url_for('admin')}}">Админ</a></nav></header><main>{% with messages=get_flashed_messages() %}{% if messages %}{% for msg in messages %}<div class="alert">{{msg}}</div>{% endfor %}{% endif %}{% endwith %}{{body|safe}}</main><div class="footer">NEXVORA STORE • Black & Gold</div></html>''',title=title,body=body)
+
+@app.route('/media/<path:filename>')
+def media(filename):
+    return send_from_directory(UPLOADS,filename)
+
 @app.route('/')
 def home():
- q=request.args.get('q','').strip();cat=request.args.get('cat','');sort=request.args.get('sort','new');ps=products()
- if q:ps=[p for p in ps if q.casefold() in (p['name']+' '+p['category']+' '+p['description']).casefold()]
- if cat:ps=[p for p in ps if p['category']==cat]
- if sort=='cheap':ps.sort(key=effective)
- elif sort=='expensive':ps.sort(key=effective,reverse=True)
- cats=sorted({p['category'] for p in products()});until=setting('flash_until');discount=setting('flash_percent','0')
- body=f'<div class=hero><h1>NEXVORA STORE</h1><p>{setting("banner")}</p><p>Premium collection · Special offers</p></div>'
- if discount and until and until>datetime.now().strftime('%Y-%m-%dT%H:%M'):body+=f'<div class=flash>🔥 Flash sale: {discount}% · until {until}</div>'
- body+=f'<form id=search class=row method=get><input id=q class=input name=q value="{q}" placeholder="{t("search")}" style="flex:1"><button type=button class=btn onclick=voice()>🎙</button><select name=cat style="width:auto"><option value="">{t("all")}</option>'+''.join(f'<option value="{c}" {"selected" if cat==c else ""}>{c}</option>' for c in cats)+f'</select><select name=sort style="width:auto"><option value=new>New</option><option value=cheap>Price ↑</option><option value=expensive>Price ↓</option></select><button class=btn>{t("search")}</button></form>'
- body+='<h2>🛍️ Products</h2><div class=grid>'+''.join(card(p) for p in ps)+'</div>' if ps else '<p>'+t('empty')+'</p>'
- body+='<h2>👀 Recently viewed</h2><div class=grid>'+''.join(card(p) for p in viewed())+'</div>'
- return page(body)
-@app.route('/p/<int:pid>')
-def detail(pid):
- p=product(pid)
- if not p:abort(404)
- seen=session.get('viewed',[]);session['viewed']=[pid]+[x for x in seen if x!=pid][:8];im=imgs(p)
- body=f'<h1>{p["name"]}</h1><div class=panel><div class=grid><div><img id=mainpic src="/static/uploads/{im[0] if im else ""}" style="width:100%;max-height:420px;object-fit:contain" onclick="this.style.transform=this.style.transform?\'\':\'scale(1.35)\'"><div class=thumbs>'+''.join(f'<img src=/static/uploads/{x} onclick="document.getElementById(\'mainpic\').src=this.src">' for x in im)+'</div>'
- if p['video']:body+=f'<video controls src=/static/uploads/{p["video"]}></video>'
- body+=f'</div><div><h2 class=price>{money(effective(p))} TJS</h2><p>{p["description"]}</p><p>Stock: {p["stock"]}</p><form method=post action=/cart/add/{pid}><input type=hidden name=csrf value={csrf()}><input class=input type=number name=qty value=1 min=1 max={max(1,p["stock"])}><button class="btn green">{t("buy")}</button></form><a class=btn href=/buy/{pid}>Buy Now</a> <a class=btn href=/share/{pid}>Share</a> <a class=btn href=/qr/{pid}>QR</a></div></div></div>'
- with db() as c:rs=[dict(r) for r in c.execute('select * from reviews where product_id=? order by id desc',(pid,))];qs=[dict(r) for r in c.execute('select * from questions where product_id=? order by id desc',(pid,))]
- avg=sum(r['stars'] for r in rs)/len(rs) if rs else 0;body+=f'<h2>⭐ {avg:.1f} ({len(rs)} reviews)</h2><form method=post action=/review/{pid} class=panel><input type=hidden name=csrf value={csrf()}><input class=input name=customer placeholder="Name"><select name=stars class=input><option>5</option><option>4</option><option>3</option><option>2</option><option>1</option></select><textarea class=input name=body placeholder="Review"></textarea><button class=btn>Submit</button></form>'
- body+=''.join(f'<div class=panel><span class=stars>{"★"*r["stars"]}</span> {r["customer"]}<p>{r["body"]}</p></div>' for r in rs)
- body+=f'<h2>Questions</h2><form method=post action=/question/{pid} class=panel><input type=hidden name=csrf value={csrf()}><input class=input name=customer placeholder=Name><textarea class=input name=body placeholder="Ask question"></textarea><button class=btn>Send</button></form>'+' '.join(f'<div class=panel><p>{q["body"]}</p><p>{q["answer"]}</p></div>' for q in qs)
- body+='<h2>Related products</h2><div class=grid>'+''.join(card(x) for x in products() if x['category']==p['category'] and x['id']!=pid)+'</div>'
- return page(body,p['name'])
-@app.post('/review/<int:pid>')
-def review(pid):
- if not product(pid):abort(404)
- with db() as c:c.execute('insert into reviews(product_id,customer,stars,body) values(?,?,?,?)',(pid,request.form.get('customer','Guest')[:80],max(1,min(5,int(request.form.get('stars',5)))),request.form.get('body','')[:1200]))
- return redirect('/p/'+str(pid))
-@app.post('/question/<int:pid>')
-def question(pid):
- with db() as c:c.execute('insert into questions(product_id,customer,body) values(?,?,?)',(pid,request.form.get('customer','Guest')[:80],request.form.get('body','')[:1000]))
- return redirect('/p/'+str(pid))
-@app.post('/cart/add/<int:pid>')
-def addcart(pid):
- p=product(pid)
- if not p:abort(404)
- c=cart();c[str(pid)]=min(int(c.get(str(pid),0))+int(request.form.get('qty',1)),max(1,int(p['stock'] or 1)));session['cart']=c;flash(t('added'));return redirect(request.referrer or '/')
-@app.get('/buy/<int:pid>')
-def buy(pid):cart()[str(pid)]=1;return redirect('/checkout')
+    search=request.args.get('q','').strip(); cat=request.args.get('cat',''); lo=request.args.get('min',''); hi=request.args.get('max',''); sort=request.args.get('sort','new')
+    c=db(); sql='SELECT * FROM products WHERE active=1'; args=[]
+    if search: sql+=' AND (name LIKE ? OR description LIKE ?)'; args += [f'%{search}%',f'%{search}%']
+    if cat: sql+=' AND category=?'; args.append(cat)
+    try:
+        if lo.strip(): sql+=' AND COALESCE(NULLIF(sale_price,0),price)>=?'; args.append(float(lo))
+        if hi.strip(): sql+=' AND COALESCE(NULLIF(sale_price,0),price)<=?'; args.append(float(hi))
+    except ValueError: pass
+    sql+= ' ORDER BY price ASC' if sort=='cheap' else (' ORDER BY price DESC' if sort=='expensive' else ' ORDER BY id DESC')
+    products=c.execute(sql,args).fetchall(); cats=[r['category'] for r in c.execute('SELECT DISTINCT category FROM products WHERE active=1 ORDER BY category')]; c.close()
+    cards=''.join(f'''<div class="card product"><a href="{url_for('product',pid=p['id'])}"><img src="{url_for('media',filename=(get_images(p['id']) or [p['image']])[0])}" onerror="this.style.display='none'"><h3>{p['name']}</h3></a><p class="price">{money(current_price(p))} сомонӣ</p><p class="muted">{p['category']} • Дар анбор: {p['stock']}</p><form method="post" action="{url_for('cart_action',action='add',pid=p['id'])}">{token_field()}<button>Ба сабад</button></form><form method="post" action="{url_for('favorite_toggle',pid=p['id'])}">{token_field()}<button>♡ Дӯстдошта</button></form></div>''' for p in products)
+    body=f'''<h1 class="gold">NEXVORA STORE</h1><p>Магазини онлайн • Сифат ва услуб</p><form><div class="formrow"><input name="q" placeholder="Ҷустуҷӯи маҳсулот..." value="{search}"><select name="cat"><option value="">Ҳама категория</option>{''.join(f'<option {"selected" if cat==x else ""}>{x}</option>' for x in cats)}</select><input name="min" type="number" placeholder="Аз нарх" value="{lo}"><input name="max" type="number" placeholder="То нарх" value="{hi}"><select name="sort"><option value="new">Навтарин</option><option value="cheap" {'selected' if sort=='cheap' else ''}>Арзон</option><option value="expensive" {'selected' if sort=='expensive' else ''}>Қимат</option></select><button>Ҷустуҷӯ</button></div></form><div class="grid">{cards or '<p>Маҳсулот ёфт нашуд.</p>'}</div>'''
+    return page('Магазин',body)
+
+@app.route('/product/<int:pid>',methods=['GET','POST'])
+def product(pid):
+    p=get_product(pid)
+    if not p or not p['active']: abort(404)
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        rating=max(1,min(5,int(request.form.get('rating',5)))); name=request.form.get('name','Меҳмон')[:80]; comment=request.form.get('comment','')[:1000]
+        c=db(); c.execute('INSERT INTO reviews(product_id,name,rating,comment) VALUES(?,?,?,?)',(pid,name,rating,comment)); c.commit(); c.close(); flash('Шарҳи шумо илова шуд!'); return redirect(url_for('product',pid=pid))
+    c=db(); reviews=c.execute('SELECT * FROM reviews WHERE product_id=? ORDER BY id DESC',(pid,)).fetchall(); avg=c.execute('SELECT AVG(rating) a FROM reviews WHERE product_id=?',(pid,)).fetchone()['a']; c.close()
+    imgs=get_images(pid) or ([p['image']] if p['image'] else [])
+    gallery=''.join(f'<img src="{url_for("media",filename=im)}">' for im in imgs)
+    video=f'<video controls src="{url_for("media",filename=p["video"])}"></video>' if p['video'] else ''
+    reviews_html=''.join(f'<div class="card"><b>{r["name"]}</b> • {"⭐"*r["rating"]}<p>{r["comment"]}</p></div>' for r in reviews)
+    body=f'''<a href="/">← Бозгашт</a><h1>{p['name']}</h1><div class="gallery">{gallery}</div>{video}<p class="price">{money(current_price(p))} сомонӣ</p><p>Категория: {p['category']} • Миқдор: {p['stock']}</p><p>{p['description']}</p><form method="post" action="{url_for('cart_action',action='add',pid=pid)}">{token_field()}<button>Ба сабад илова кардан</button></form><p>⭐ Рейтинг: {round(avg or 0,1)} / 5 ({len(reviews)} шарҳ)</p><h3>Шарҳ нависед</h3><form method="post"><input name="csrf" value="{session.get('csrf')}" type="hidden"><div class="formrow"><input name="name" placeholder="Номи шумо"><select name="rating"><option>5</option><option>4</option><option>3</option><option>2</option><option>1</option></select></div><textarea class="wide" name="comment" placeholder="Шарҳ..."></textarea><button>Фиристодан</button></form><h3>Шарҳҳо</h3>{reviews_html}'''
+    return page(p['name'],body)
+
+@app.route('/favorite/toggle/<int:pid>',methods=['POST'])
+def favorite_toggle(pid):
+    if not valid_csrf(): abort(400)
+    fav=session.get('favorites',[]); key=str(pid)
+    if key in fav: fav.remove(key)
+    else: fav.append(key)
+    session['favorites']=fav; return redirect(request.referrer or url_for('home'))
+@app.route('/favorites')
+def favorites():
+    fav=session.get('favorites',[]); c=db(); ps=[]
+    for key in fav:
+        p=c.execute('SELECT * FROM products WHERE id=? AND active=1',(key,)).fetchone()
+        if p: ps.append(p)
+    c.close(); cards=''.join(f'<div class="card product"><a href="{url_for("product",pid=p["id"])}"><img src="{url_for("media",filename=(get_images(p["id"]) or [p["image"]])[0])}"><h3>{p["name"]}</h3></a><p class="price">{money(current_price(p))} сомонӣ</p></div>' for p in ps)
+    return page('Дӯстдошта',f'<h1>❤️ Дӯстдошта</h1><div class="grid">{cards or "Ҳоло маҳсулот нест."}</div>')
+
 @app.route('/cart')
-def cartpage():
- rows,total=cart_rows();body='<h1>'+t('cart')+'</h1>'
- body+=''.join(f'<div class=panel><b>{p["name"]}</b> · {q} × {money(effective(p))} = {money(line)} <a class=btn href=/cart/remove/{p["id"]}>Remove</a></div>' for p,q,line in rows)
- body+=f'<h2>{t("total")}: {money(total)}</h2><a class=btn href=/checkout>Checkout</a>' if rows else '<p>Cart empty</p>'
- return page(body)
-@app.get('/cart/remove/<int:pid>')
-def cartremove(pid):cart().pop(str(pid),None);return redirect('/cart')
-@app.route('/promo',methods=['POST'])
-def promo():
- code=request.form.get('code','').strip().upper()
- with db() as c:r=c.execute('select * from promos where code=? and active=1',(code,)).fetchone()
- if r:session['promo']=code;flash('Promo applied')
- else:session.pop('promo',None);flash('Invalid code')
- return redirect('/checkout')
+def cart():
+    items,total=cart_items(); discount=session.get('discount',0); promo=session.get('promo',''); fee=DELIVERY_FEE if items else 0
+    rows=''.join(f'''<div class="card"><b>{it['product']['name']}</b> • {it['qty']} дона • {money(it['subtotal'])} сомонӣ <form class="formrow" method="post" action="{url_for('cart_action',action='remove',pid=it['product']['id'])}">{token_field()}<button>Хориҷ</button></form></div>''' for it in items)
+    body=f'''<h1>🛒 Сабад</h1>{rows or 'Сабад холӣ аст.'}<p>Маблағ: {money(total)} сомонӣ</p><p>Тахфиф: {money(discount)} сомонӣ</p><p>Доставка: {money(fee)} сомонӣ</p><h2 class="gold">Ҳамагӣ: {money(max(0,total-discount)+fee)} сомонӣ</h2><form method="post" action="{url_for('apply_promo')}">{token_field()}<div class="formrow"><input name="code" placeholder="Промокод" value="{promo}"><button>Apply</button></div></form><a class="btn" href="/checkout">Оформить заказ</a>'''
+    return page('Сабад',body)
+@app.route('/cart/<action>/<int:pid>',methods=['POST'])
+def cart_action(action,pid):
+    if not valid_csrf(): abort(400)
+    p=get_product(pid); cart=session.get('cart',{}); k=str(pid)
+    if p and action=='add': cart[k]=min(int(cart.get(k,0))+1,int(p['stock']))
+    elif action=='remove': cart.pop(k,None)
+    session['cart']=cart; return redirect(request.referrer or url_for('cart'))
+@app.route('/cart/promo',methods=['POST'])
+def apply_promo():
+    if not valid_csrf(): abort(400)
+    c=db(); row=c.execute('SELECT * FROM promos WHERE code=? AND active=1',(request.form.get('code','').upper(),)).fetchone(); c.close()
+    if row:
+        _,total=cart_items(); discount=min(total,float(row['discount'])); session['discount']=discount; session['promo']=row['code']; flash('Промокод қабул шуд!')
+    else: session['discount']=0; session['promo']=''; flash('Промокод нодуруст аст.')
+    return redirect(url_for('cart'))
+
 @app.route('/checkout',methods=['GET','POST'])
 def checkout():
- rows,subtotal=cart_rows();promo=session.get('promo','');disc=0
- if promo:
-  with db() as c:r=c.execute('select * from promos where code=? and active=1',(promo,)).fetchone()
-  if r:disc=subtotal*r['discount']/100 if r['kind']=='percent' else r['discount']
- delivery=float(setting('delivery','0') or 0);total=max(0,subtotal-disc)+delivery
- if request.method=='POST':
-  if not rows:flash('Cart empty');return redirect('/cart')
-  customer=request.form.get('customer','').strip();phone=request.form.get('phone','').strip()
-  if not customer or not phone:flash('Name and phone required');return redirect('/checkout')
-  oid=uuid.uuid4().hex[:10].upper();items=[{'product':p['name'],'id':p['id'],'qty':q,'price':effective(p)} for p,q,line in rows]
-  with db() as c:
-   c.execute('insert into orders(id,customer,phone,address,note,items,subtotal,discount,delivery,total,promo,payment) values(?,?,?,?,?,?,?,?,?,?,?,?)',(oid,customer,phone,request.form.get('address',''),request.form.get('note',''),json.dumps(items),subtotal,disc,delivery,total,promo,request.form.get('payment','cash')))
-   for p,q,line in rows:c.execute('update products set stock=max(0,stock-?) where id=?',(q,p['id']))
-  session['cart']={};session.pop('promo',None);flash(t('orderok')+': '+oid);return redirect('/track?id='+oid)
- body=f'<h1>{t("checkout")}</h1><div class=panel><p>Subtotal {money(subtotal)} · Discount {money(disc)} · Delivery {money(delivery)}</p><h2>{t("total")}: {money(total)} TJS</h2></div><form method=post class=panel><input type=hidden name=csrf value={csrf()}><input class=input name=customer placeholder="{t("name")}" required><input class=input name=phone placeholder="{t("phone")}" required><input class=input name=address placeholder="{t("address")}" required><textarea class=input name=note placeholder="Note"></textarea><select class=input name=payment><option value=cash>{t("cash")}</option><option value=manual>Manual / transfer</option></select><button class=btn>{t("send")}</button></form><form method=post action=/promo><input type=hidden name=csrf value={csrf()}><input class=input name=code placeholder="{t("promo")}"/><button class=btn>{t("apply")}</button></form>'
- return page(body)
-@app.route('/track')
+    items,total=cart_items()
+    if not items: return redirect(url_for('cart'))
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        name=request.form.get('name','').strip(); phone=request.form.get('phone','').strip(); address=request.form.get('address','').strip(); note=request.form.get('note','')[:500]
+        if not name or not phone or not address: flash('Ном, телефон ва адресро пур кунед.'); return redirect(url_for('checkout'))
+        c=db()
+        for it in items:
+            current=c.execute('SELECT stock FROM products WHERE id=?',(it['product']['id'],)).fetchone()
+            if not current or current['stock']<it['qty']: c.close(); flash('Миқдори маҳсулот кам аст.'); return redirect(url_for('cart'))
+        for it in items: c.execute('UPDATE products SET stock=stock-? WHERE id=?',(it['qty'],it['product']['id']))
+        disc=min(total,float(session.get('discount',0))); fee=DELIVERY_FEE; final=max(0,total-disc)+fee
+        items_json=json.dumps([{'id':it['product']['id'],'name':it['product']['name'],'qty':it['qty'],'price':it['price']} for it in items],ensure_ascii=False)
+        c.execute('INSERT INTO orders(customer_name,phone,address,note,items_json,total,status,discount,promo,delivery_fee) VALUES(?,?,?,?,?,?,?,?,?,?)',(name,phone,address,note,items_json,final,'Нав',disc,session.get('promo',''),fee))
+        oid=c.execute('SELECT last_insert_rowid()').fetchone()[0]; c.commit(); c.close(); session['cart']={}; session['discount']=0; session['promo']=''
+        wa=f"Салом! Заказ #{oid}. Ном: {name}. Телефон: {phone}. Адрес: {address}. Маблағ: {money(final)} сомонӣ."
+        return redirect(url_for('done',oid=oid,wa=wa))
+    body=f'''<h1>Оформление заказа</h1><p>Ҳамагӣ: {money(total-min(total,session.get('discount',0))+DELIVERY_FEE)} сомонӣ (доставка {DELIVERY_FEE})</p><form method="post">{token_field()}<input class="wide" name="name" placeholder="Ном" required><input class="wide" name="phone" placeholder="Телефон" required><input class="wide" name="address" placeholder="Адрес" required><textarea class="wide" name="note" placeholder="Эзоҳ"></textarea><button>Фармоиш додан</button></form>'''
+    return page('Checkout',body)
+@app.route('/done/<int:oid>')
+def done(oid):
+    wa_text=request.args.get('wa', f'Order #{oid}')
+    wa_link=f'https://wa.me/{WHATSAPP_NUMBER}?text={quote(wa_text)}'
+    return page('Фармоиш',f'<h1 class="gold">Фармоиш қабул шуд!</h1><p>Рақами фармоиш: #{oid}</p><p>Ин рақамро нигоҳ доред барои tracking.</p><a class="btn" href="{url_for("track",oid=oid)}">Пайгирии фармоиш</a><p><a href="{wa_link}" target="_blank">Фиристодани маълумоти фармоиш ба WhatsApp</a></p>')
+@app.route('/track',methods=['GET','POST'])
 def track():
- oid=request.args.get('id','').upper()
- with db() as c:r=c.execute('select id,status,created from orders where id=?',(oid,)).fetchone() if oid else None
- body=f'<h1>{t("track")}</h1><form><input class=input name=id placeholder="Order code"><button class=btn>Search</button></form>'
- if r:body+=f'<div class=panel><h2>{r["id"]}</h2><p>{r["status"]}</p><p>{r["created"]}</p><a class=btn href=/invoice/{r["id"]}>Invoice</a></div>'
- elif oid:body+='<p>Order not found</p>'
- return page(body)
-@app.route('/fav/<int:pid>')
-def fav(pid):
- f=session.get('favorites',[])
- if pid in f:f.remove(pid)
- else:f.append(pid)
- session['favorites']=f;return redirect(request.referrer or '/')
-@app.route('/favorites')
-def favorites():return page('<h1>'+t('fav')+'</h1><div class=grid>'+''.join(card(p) for i in session.get('favorites',[]) if (p:=product(i)))+'</div>')
-@app.route('/compare/add/<int:pid>')
-def compareadd(pid):
- a=session.get('compare',[])
- if pid not in a:a.append(pid)
- session['compare']=a[:4];return redirect('/compare')
-@app.route('/compare')
-def compare():
- ps=[product(i) for i in session.get('compare',[])];ps=[p for p in ps if p]
- body='<h1>Compare up to 4</h1><div class=grid>'+''.join(card(p) for p in ps)+'</div><div class=panel><table>'+''.join(f'<tr><td>{p["name"]}</td><td>{money(effective(p))} TJS</td><td>{p["category"]}</td><td>{p["stock"]}</td></tr>' for p in ps)+'</table></div>'
- return page(body)
-@app.route('/share/<int:pid>')
-def share(pid):p=product(pid);return redirect('https://wa.me/?text='+quote(f'NEXVORA {p["name"]}: {request.url}')) if p else abort(404)
-@app.route('/qr/<int:pid>')
-def qr(pid):
- if not product(pid):abort(404)
- link=request.url_root+'p/'+str(pid);return page(f'<h1>QR · Product</h1><img style="width:240px;background:white;padding:8px" src="https://api.qrserver.com/v1/create-qr-code/?size=240x240&data={quote(link)}"><p><a class=btn href={link}>Product link</a></p>')
-@app.route('/invoice/<oid>')
-def invoice(oid):
- with db() as c:r=c.execute('select * from orders where id=?',(oid.upper(),)).fetchone()
- if not r:abort(404)
- return page(f'<h1>Invoice {r["id"]}</h1><div class=panel><p>{r["customer"]} · {r["phone"]}</p><p>Subtotal: {r["subtotal"]}</p><p>Discount: {r["discount"]}</p><p>Delivery: {r["delivery"]}</p><h2>Total: {r["total"]} TJS</h2></div><button class=btn onclick="print()">Print/PDF</button>')
-@app.route('/gift',methods=['GET','POST'])
-def gift():
- if request.method=='POST':
-  amount=max(1,float(request.form.get('amount',1)));code=secrets.token_hex(4).upper()
-  with db() as c:c.execute('insert into giftcards values(?,?,?,1)',(code,amount,amount))
-  flash('Gift Card code: '+code)
- return page('<h1>Gift Card</h1><form method=post><input type=hidden name=csrf value='+csrf()+'><input class=input type=number min=1 name=amount placeholder=Amount><button class=btn>Create gift card</button></form>')
-@app.route('/referral')
-def referral():
- code=session.setdefault('refcode',secrets.token_hex(3).upper());return page(f'<h1>Referral</h1><p>Your invite code: <b>{code}</b></p><p>Invite/share code. Bonus settings: {setting("ref_bonus","10")}</p>')
-@app.route('/manifest.json')
-def manifest():return jsonify(name='NEXVORA STORE',short_name='NEXVORA',start_url='/',display='standalone',background_color='#09090b',theme_color='#e8c958')
-@app.route('/sw.js')
-def sw():return Response("self.addEventListener('install',e=>self.skipWaiting());self.addEventListener('fetch',e=>{});",mimetype='application/javascript')
-# Admin section
-@app.route('/admin',methods=['GET','POST'])
-def adminlogin():
- if adminok():return redirect('/admin/dashboard')
- if request.method=='POST':
-  if hmac.compare_digest(request.form.get('password',''),ADMIN):session.clear();session['admin']=True;session['csrf']=secrets.token_hex(24);log('login','admin');return redirect('/admin/dashboard')
-  flash('Password incorrect')
- return page('<h1>Admin Login</h1><form method=post class=panel><input type=hidden name=csrf value='+csrf()+'><input class=input type=password name=password placeholder=Password><button class=btn>Login</button></form>')
-@app.route('/admin/dashboard')
-def dashboard():
- if not adminok():return redirect('/admin')
- with db() as c:orders=[dict(x) for x in c.execute('select * from orders order by created desc')];sales=c.execute('select coalesce(sum(total),0) from orders').fetchone()[0];reviews=c.execute('select count(*) from reviews').fetchone()[0];logs=[dict(x) for x in c.execute('select * from logs order by id desc limit 20')];questions=[dict(x) for x in c.execute('select * from questions order by id desc')]
- body=f'<h1>Admin PRO Dashboard</h1><div class=grid><div class=panel>Products: {len(products())}</div><div class=panel>Orders: {len(orders)}</div><div class=panel>Sales: {money(sales)} TJS</div><div class=panel>Reviews: {reviews}</div></div><h2>Orders</h2><div class=panel>'+''.join(f'<p>#{o["id"]} {o["customer"]} {o["phone"]} {money(o["total"])} · {o["status"]} <a class=btn href=/admin/status/{o["id"]}>Status</a></p>' for o in orders)+'</div>'
- body+='<h2>Add product / multiple photos / video</h2><form class=panel method=post action=/admin/add enctype=multipart/form-data><input type=hidden name=csrf value='+csrf()+'><input class=input name=name required placeholder=Name><input class=input name=price type=number step=.01 required placeholder=Price><input class=input name=old_price type=number step=.01 placeholder=Old price><input class=input name=sale_price type=number step=.01 placeholder=Sale price><input class=input name=category placeholder=Category><textarea class=input name=description placeholder=Description></textarea><input class=input name=stock type=number placeholder=Stock value=10><label>Photos (multiple) <input type=file name=images multiple accept=image/*></label><label>Video <input type=file name=video accept=video/mp4,video/webm></label><input class=input name=scheduled type=datetime-local><button class=btn>Add product</button></form>'
- body+='<h2>Manage products</h2><div class=grid>'+''.join(f'<div class=panel><b>{p["name"]}</b> · {p["price"]} · stock {p["stock"]}<form method=post action=/admin/delete/{p["id"]}><input type=hidden name=csrf value={csrf()}><button class="btn red">Delete</button></form></div>' for p in products())+'</div>'
- body+='<h2>Promo code</h2><form class=panel method=post action=/admin/promo><input type=hidden name=csrf value='+csrf()+'><input class=input name=code placeholder=Code><input class=input name=discount type=number placeholder=Discount><select name=kind><option value=amount>Somoni</option><option value=percent>Percent</option></select><button class=btn>Create</button></form>'
- body+='<h2>Settings / Banner / delivery / flash sale</h2><form class=panel method=post action=/admin/settings><input type=hidden name=csrf value='+csrf()+'><input class=input name=banner value="'+setting('banner')+'"><input class=input name=delivery type=number value='+setting('delivery','0')+' placeholder=Delivery><input class=input name=flash_percent type=number value='+setting('flash_percent','0')+' placeholder=Flash percent><input class=input name=flash_until type=datetime-local value="'+setting('flash_until','')+'"><button class=btn>Save settings</button></form>'
- body+='<h2>CSV</h2><a class=btn href=/admin/export>Export CSV</a><form class=panel method=post action=/admin/import enctype=multipart/form-data><input type=hidden name=csrf value='+csrf()+'><input type=file name=file accept=.csv><button class=btn>Import</button></form><h2>Low inventory</h2><div class=panel>'+''.join(f'<p>{p["name"]}: {p["stock"]}</p>' for p in products() if p['stock']<5)+'</div>'
- body+='<h2>Questions (admin replies are available in database/log for now)</h2><div class=panel>'+''.join(f'<p>Product {q["product_id"]}: {q["body"]}</p>' for q in questions)+'</div><h2>Activity log</h2><div class=panel>'+''.join(f'<p>{l["created"]} {l["action"]}: {l["detail"]}</p>' for l in logs)+'</div><a class=btn red href=/admin/logout>Logout</a>'
- return page(body)
-@app.post('/admin/add')
-def adminadd():
- if not adminok():return redirect('/admin')
- try:pr=float(request.form.get('price',0));stock=max(0,int(request.form.get('stock',0)));old=float(request.form.get('old_price',0) or 0);sale=float(request.form.get('sale_price',0) or 0)
- except:flash('Invalid price/stock');return redirect('/admin/dashboard')
- pics=uploads(request.files.getlist('images'),IMG);videos=uploads([request.files.get('video')],VID)
- with db() as c:c.execute('insert into products(name,price,old_price,sale_price,category,description,images,video,stock,scheduled) values(?,?,?,?,?,?,?,?,?,?)',(request.form.get('name',''),pr,old,sale,request.form.get('category','Дигар'),request.form.get('description',''),json.dumps(pics),videos[0] if videos else '',stock,request.form.get('scheduled','')))
- log('product_add',request.form.get('name'));flash('Product added');return redirect('/admin/dashboard')
-@app.post('/admin/delete/<int:pid>')
-def admindel(pid):
- if not adminok():return redirect('/admin')
- with db() as c:c.execute('update products set active=0 where id=?',(pid,))
- log('product_delete',pid);return redirect('/admin/dashboard')
-@app.post('/admin/promo')
-def adminpromo():
- if not adminok():return redirect('/admin')
- code=request.form.get('code','').upper().strip();discount=float(request.form.get('discount',0) or 0)
- with db() as c:c.execute('insert or replace into promos(code,discount,kind,active) values(?,?,?,1)',(code,discount,request.form.get('kind','amount')))
- log('promo_create',code);return redirect('/admin/dashboard')
-@app.post('/admin/settings')
-def adminsettings():
- if not adminok():return redirect('/admin')
- for k in ['banner','delivery','flash_percent','flash_until']:
-  with db() as c:c.execute('insert or replace into settings(key,value) values(?,?)',(k,request.form.get(k,'')))
- log('settings_update');return redirect('/admin/dashboard')
-@app.route('/admin/status/<oid>',methods=['GET','POST'])
-def adminstatus(oid):
- if not adminok():return redirect('/admin')
- with db() as c:
-  if request.method=='POST':c.execute('update orders set status=? where id=?',(request.form.get('status'),oid));log('order_status',oid)
-  r=c.execute('select * from orders where id=?',(oid,)).fetchone()
- if not r:abort(404)
- return page(f'<h1>Order {oid}</h1><p>{r["customer"]} · {r["phone"]} · {r["total"]}</p><form method=post><input type=hidden name=csrf value={csrf()}><select class=input name=status><option>Қабул шуд</option><option>Тасдиқ шуд</option><option>Омода мешавад</option><option>Фиристода шуд</option><option>Анҷом ёфт</option><option>Бекор</option></select><button class=btn>Update status</button></form>')
-@app.get('/admin/export')
-def exportcsv():
- if not adminok():return redirect('/admin')
- with db() as c:rows=c.execute('select id,name,price,category,stock,description from products').fetchall()
- f=io.StringIO();w=csv.writer(f);w.writerow(['id','name','price','category','stock','description']);w.writerows(rows);r=make_response(f.getvalue());r.headers['Content-Disposition']='attachment; filename=nexvora.csv';r.headers['Content-Type']='text/csv; charset=utf-8';return r
-@app.post('/admin/import')
-def importcsv():
- if not adminok():return redirect('/admin')
- f=request.files.get('file')
- if f:
-  reader=csv.DictReader(io.StringIO(f.stream.read().decode('utf-8-sig')))
-  with db() as c:
-   for row in reader:
-    try:c.execute('insert into products(name,price,category,stock,description) values(?,?,?,?,?)',(row.get('name',''),float(row.get('price',0)),row.get('category','Дигар'),int(row.get('stock',0)),row.get('description','')))
-    except Exception:pass
- flash('CSV imported');return redirect('/admin/dashboard')
-@app.get('/admin/logout')
-def logout():session.clear();return redirect('/')
+    oid=request.args.get('oid') or request.form.get('oid','')
+    order=None
+    if oid:
+        try: c=db(); order=c.execute('SELECT * FROM orders WHERE id=?',(int(oid),)).fetchone(); c.close()
+        except: order=None
+    body=f'''<h1>📦 Tracking</h1><form method="post"><div class="formrow"><input name="oid" placeholder="Рақами фармоиш" value="{oid}"><button>Пайгирӣ</button></div></form>'''
+    if order: body+=f'<div class="card"><h2>Фармоиш #{order["id"]}</h2><p>Ном: {order["customer_name"]}</p><p>Ҳолат: <b class="gold">{order["status"]}</b></p><p>Ҳамагӣ: {money(order["total"])} сомонӣ</p><p>Сана: {order["created_at"]}</p></div>'
+    elif oid: body+='<p>Фармоиш ёфт нашуд.</p>'
+    return page('Tracking',body)
+
+@app.route('/login',methods=['GET','POST'])
+def login():
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        pw=request.form.get('password','')
+        stored=os.environ.get('ADMIN_PASSWORD_HASH')
+        ok=check_password_hash(stored,pw) if stored else secrets.compare_digest(pw,ADMIN_PASSWORD)
+        if ok: session['admin']=True; return redirect(url_for('admin'))
+        flash('Парол нодуруст аст.')
+    return page('Админ',f'<h1>Admin login</h1><form method="post">{token_field()}<input type="password" name="password" placeholder="Парол"><button>Ворид шудан</button></form>')
+@app.route('/logout')
+def logout(): session.pop('admin',None); return redirect('/')
+
+@app.route('/admin')
+@admin_required
+def admin():
+    c=db(); products=c.execute('SELECT * FROM products ORDER BY id DESC').fetchall(); orders=c.execute('SELECT * FROM orders ORDER BY id DESC').fetchall(); new=c.execute("SELECT COUNT(*) n FROM orders WHERE status='Нав'").fetchone()['n']; visits=c.execute('SELECT COUNT(*) n FROM hits').fetchone()['n']; revenue=c.execute("SELECT COALESCE(SUM(total),0) s FROM orders WHERE status!='Бекор'").fetchone()['s']; c.close()
+    rows=''.join(f'<tr><td>{p["id"]}</td><td>{p["name"]}</td><td>{money(p["price"])} сом</td><td>{p["stock"]}</td><td><a href="{url_for("edit_product",pid=p["id"])}">Edit</a> | <form style="display:inline" method="post" action="{url_for("delete_product",pid=p["id"])}">{token_field()}<button>Delete</button></form></td></tr>' for p in products)
+    order_rows=''.join(f'<tr><td>#{o["id"]}</td><td>{o["customer_name"]}</td><td>{money(o["total"])} сом</td><td>{o["status"]}</td><td><a href="{url_for("order_admin",oid=o["id"])}">Дидан</a></td></tr>' for o in orders)
+    body=f'''<h1>Админ панел <a href="/logout">Logout</a></h1><div class="grid"><div class="card">📦 Маҳсулот: {len(products)}</div><div class="card">🔔 Фармоиши нав: <b class="gold">{new}</b></div><div class="card">💰 Даромад: {money(revenue)} сомонӣ</div><div class="card">👁️ Боздид: {visits}</div></div><h2>Иловаи маҳсулот</h2><form method="post" action="/admin/add" enctype="multipart/form-data">{token_field()}<div class="formrow"><input name="name" placeholder="Ном" required><input name="price" type="number" step="0.01" placeholder="Нарх" required><input name="sale_price" type="number" placeholder="Нархи тахфиф"></div><div class="formrow"><input name="category" placeholder="Категория"><input name="stock" type="number" placeholder="Миқдор"><input name="description" placeholder="Тавсиф"></div><label>Суратҳо (якчанд):</label><input type="file" name="images" multiple accept="image/*"><label>Видео:</label><input type="file" name="video" accept="video/mp4,video/webm"><button>Илова кардан</button></form><h2>Маҳсулотҳо</h2><table><tr><th>ID</th><th>Ном</th><th>Нарх</th><th>Миқдор</th><th>Action</th></tr>{rows}</table><h2>Фармоишҳо</h2><table><tr><th>ID</th><th>Ном</th><th>Маблағ</th><th>Ҳолат</th><th></th></tr>{order_rows}</table><h2>Промокод</h2><form method="post" action="/admin/promo">{token_field()}<div class="formrow"><input name="code" placeholder="Код"><input name="discount" type="number" placeholder="Тахфиф (сомонӣ)"><button>Создан</button></div></form>'''
+    return page('Админ',body)
+
+@app.route('/admin/add',methods=['POST'])
+@admin_required
+def add_product():
+    if not valid_csrf(): abort(400)
+    name=request.form.get('name','').strip(); price=float(request.form.get('price',0) or 0); sale=float(request.form.get('sale_price',0) or 0); cat=request.form.get('category','Дигар'); stock=int(request.form.get('stock',0) or 0); desc=request.form.get('description','')
+    imgs=[media_save(f,ALLOWED_IMAGES) for f in request.files.getlist('images')]; imgs=[x for x in imgs if x]
+    vid=media_save(request.files.get('video'),ALLOWED_VIDEOS)
+    c=db(); c.execute('INSERT INTO products(name,price,image,category,description,stock,sale_price,video) VALUES(?,?,?,?,?,?,?,?)',(name,price,imgs[0] if imgs else '',cat,desc,stock,sale,vid)); pid=c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    for i,im in enumerate(imgs): c.execute('INSERT INTO product_images(product_id,filename,position) VALUES(?,?,?)',(pid,im,i))
+    c.commit(); c.close(); flash('Маҳсулот илова шуд!'); return redirect('/admin')
+@app.route('/admin/edit/<int:pid>',methods=['GET','POST'])
+@admin_required
+def edit_product(pid):
+    p=get_product(pid)
+    if not p: abort(404)
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        name=request.form.get('name'); price=float(request.form.get('price',0)); stock=int(request.form.get('stock',0)); cat=request.form.get('category','Дигар'); desc=request.form.get('description',''); sale=float(request.form.get('sale_price',0) or 0)
+        imgs=[media_save(f,ALLOWED_IMAGES) for f in request.files.getlist('images')]; imgs=[x for x in imgs if x]; vid=media_save(request.files.get('video'),ALLOWED_VIDEOS)
+        c=db(); c.execute('UPDATE products SET name=?,price=?,stock=?,category=?,description=?,sale_price=? WHERE id=?',(name,price,stock,cat,desc,sale,pid))
+        if imgs:
+            for im in imgs: c.execute('INSERT INTO product_images(product_id,filename,position) VALUES(?,?,?)',(pid,im,99))
+            c.execute('UPDATE products SET image=? WHERE id=?',(imgs[0],pid))
+        if vid: c.execute('UPDATE products SET video=? WHERE id=?',(vid,pid))
+        c.commit(); c.close(); return redirect('/admin')
+    return page('Edit',f'<h1>Таҳрири маҳсулот</h1><form method="post" enctype="multipart/form-data">{token_field()}<input name="name" value="{p["name"]}" placeholder="Ном"><input name="price" type="number" value="{p["price"]}"><input name="sale_price" type="number" value="{p["sale_price"]}"><input name="stock" type="number" value="{p["stock"]}"><input name="category" value="{p["category"]}"><textarea name="description">{p["description"]}</textarea><label>Иловаи суратҳо</label><input type="file" name="images" multiple><label>Иваз кардани видео</label><input type="file" name="video"><button>Сохранить</button></form>')
+@app.route('/admin/delete/<int:pid>',methods=['POST'])
+@admin_required
+def delete_product(pid):
+    if not valid_csrf(): abort(400)
+    c=db(); c.execute('DELETE FROM products WHERE id=?',(pid,)); c.execute('DELETE FROM product_images WHERE product_id=?',(pid,)); c.execute('DELETE FROM reviews WHERE product_id=?',(pid,)); c.commit(); c.close(); return redirect('/admin')
+@app.route('/admin/promo',methods=['POST'])
+@admin_required
+def promo_add():
+    if not valid_csrf(): abort(400)
+    code=request.form.get('code','').strip().upper(); discount=float(request.form.get('discount',0) or 0)
+    if code and discount>0:
+        c=db(); c.execute('INSERT OR REPLACE INTO promos(code,discount,active) VALUES(?,?,1)',(code,discount)); c.commit(); c.close()
+    return redirect('/admin')
+@app.route('/admin/order/<int:oid>')
+@admin_required
+def order_admin(oid):
+    c=db(); o=c.execute('SELECT * FROM orders WHERE id=?',(oid,)).fetchone(); c.close()
+    if not o: abort(404)
+    return page('Фармоиш',f'<h1>Заказ #{oid}</h1><p>{o["customer_name"]} • {o["phone"]} • {o["address"]}</p><p>Маблағ: {money(o["total"])} сомонӣ</p><pre>{o["items_json"]}</pre><form method="post" action="{url_for("order_status",oid=oid)}">{token_field()}<select name="status"><option>Нав</option><option>Қабул шуд</option><option>Дар роҳ</option><option>Расонида шуд</option><option>Бекор</option></select><button>Тағйир додан</button></form>')
+@app.route('/admin/order/<int:oid>/status',methods=['POST'])
+@admin_required
+def order_status(oid):
+    if not valid_csrf(): abort(400)
+    status=request.form.get('status','Нав'); c=db(); o=c.execute('SELECT * FROM orders WHERE id=?',(oid,)).fetchone()
+    if o:
+        if status=='Бекор' and not o['stock_restored']:
+            try:
+                for it in json.loads(o['items_json']): c.execute('UPDATE products SET stock=stock+? WHERE id=?',(int(it.get('qty',0)),int(it.get('id',0))))
+            except: pass
+            c.execute('UPDATE orders SET stock_restored=1,status=? WHERE id=?',(status,oid))
+        elif o['stock_restored'] and status!='Бекор':
+            try:
+                for it in json.loads(o['items_json']): c.execute('UPDATE products SET stock=MAX(0,stock-?) WHERE id=?',(int(it.get('qty',0)),int(it.get('id',0))))
+            except: pass
+            c.execute('UPDATE orders SET stock_restored=0,status=? WHERE id=?',(status,oid))
+        else: c.execute('UPDATE orders SET status=? WHERE id=?',(status,oid))
+    c.commit(); c.close(); return redirect(url_for('order_admin',oid=oid))
+
+@app.route('/admin/export.csv')
+@admin_required
+def export_csv():
+    import csv, io
+    c=db(); rows=c.execute('SELECT * FROM orders ORDER BY id DESC').fetchall(); c.close()
+    output=io.StringIO(); w=csv.writer(output); w.writerow(['id','name','phone','address','total','status','created']);
+    for r in rows: w.writerow([r['id'],r['customer_name'],r['phone'],r['address'],r['total'],r['status'],r['created_at']])
+    from flask import Response
+    return Response(output.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=orders.csv'})
+
 @app.errorhandler(413)
-def too_big(e):return 'Файл аз лимити 80MB зиёд аст.',413
-if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.environ.get('PORT','5000')),debug=False)
+def too_large(e): return page('Хатогӣ','Файл калон аст. Лутфан файли хурдтар интихоб кунед.'),413
+if __name__=='__main__':
+    app.run(host='0.0.0.0',port=int(os.environ.get('PORT',5000)),debug=False)
+et('DELIVERY_FEE', '0'))
+DATA = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(__file__), 'data'))
+UPLOADS = os.path.join(DATA, 'uploads')
+DB = os.path.join(DATA, 'nexvora.db')
+os.makedirs(UPLOADS, exist_ok=True)
+
+ALLOWED_IMAGES = {'jpg','jpeg','png','webp'}
+ALLOWED_VIDEOS = {'mp4','webm'}
+
+def ext_ok(filename, allowed):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in allowed
+
+def media_save(file, allowed):
+    if not file or not file.filename or not ext_ok(file.filename, allowed):
+        return ''
+    ext = file.filename.rsplit('.', 1)[1].lower()
+    filename = uuid.uuid4().hex + '.' + ext
+    file.save(os.path.join(UPLOADS, filename))
+    return filename
+
+def db():
+    c = sqlite3.connect(DB, timeout=20)
+    c.row_factory = sqlite3.Row
+    return c
+
+def init_db():
+    c = db(); q = c.cursor()
+    q.execute('''CREATE TABLE IF NOT EXISTS products(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, price REAL NOT NULL,
+        image TEXT DEFAULT '', category TEXT DEFAULT 'Дигар', description TEXT DEFAULT '',
+        stock INTEGER DEFAULT 0, sale_price REAL DEFAULT 0, featured INTEGER DEFAULT 0,
+        active INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP, video TEXT DEFAULT '')''')
+    q.execute('''CREATE TABLE IF NOT EXISTS orders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, customer_name TEXT, phone TEXT, address TEXT,
+        note TEXT, items_json TEXT, total REAL, status TEXT DEFAULT 'Нав',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP, discount REAL DEFAULT 0,
+        promo TEXT DEFAULT '', delivery_fee REAL DEFAULT 0, stock_restored INTEGER DEFAULT 0)''')
+    q.execute('CREATE TABLE IF NOT EXISTS promos(code TEXT PRIMARY KEY,discount REAL,active INTEGER DEFAULT 1)')
+    q.execute('CREATE TABLE IF NOT EXISTS product_images(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id INTEGER,filename TEXT,position INTEGER DEFAULT 0)')
+    q.execute('CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id INTEGER,name TEXT,rating INTEGER,comment TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)')
+    q.execute('CREATE TABLE IF NOT EXISTS hits(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)')
+    q.execute('CREATE TABLE IF NOT EXISTS store_settings(key TEXT PRIMARY KEY,value TEXT DEFAULT \'\')')
+    # Safe schema migrations for older databases
+    migrations = [('products','video',"TEXT DEFAULT ''"),('products','featured','INTEGER DEFAULT 0'),('products','active','INTEGER DEFAULT 1'),('orders','discount','REAL DEFAULT 0'),('orders','promo',"TEXT DEFAULT ''"),('orders','delivery_fee','REAL DEFAULT 0'),('orders','stock_restored','INTEGER DEFAULT 0')]
+    for table, col, definition in migrations:
+        cols = [r['name'] for r in q.execute(f'PRAGMA table_info({table})')]
+        if col not in cols:
+            q.execute(f'ALTER TABLE {table} ADD COLUMN {col} {definition}')
+    for p in q.execute('SELECT id,image FROM products').fetchall():
+        if p['image'] and not q.execute('SELECT 1 FROM product_images WHERE product_id=? LIMIT 1',(p['id'],)).fetchone():
+            q.execute('INSERT INTO product_images(product_id,filename,position) VALUES(?,?,0)',(p['id'],p['image']))
+    c.commit(); c.close()
+init_db()
+
+@app.before_request
+def csrf_init():
+    if 'csrf' not in session:
+        session['csrf'] = secrets.token_hex(16)
+
+def token_field():
+    return f'<input type="hidden" name="csrf" value="{session.get("csrf", "")}">' 
+
+def valid_csrf():
+    return secrets.compare_digest(request.form.get('csrf',''), session.get('csrf',''))
+
+@app.before_request
+def count_home():
+    if request.endpoint == 'home':
+        try:
+            c=db(); c.execute('INSERT INTO hits DEFAULT VALUES'); c.commit(); c.close()
+        except Exception: pass
+
+def admin_required(f):
+    @wraps(f)
+    def inner(*args, **kwargs):
+        if not session.get('admin'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return inner
+
+def money(v):
+    return f'{float(v or 0):,.0f}'
+
+def get_images(pid):
+    c=db(); rows=c.execute('SELECT filename FROM product_images WHERE product_id=? ORDER BY position,id',(pid,)).fetchall(); c.close()
+    return [r['filename'] for r in rows]
+
+def get_product(pid):
+    c=db(); p=c.execute('SELECT * FROM products WHERE id=?',(pid,)).fetchone(); c.close(); return p
+
+def current_price(p):
+    return float(p['sale_price'] or p['price'])
+
+def setting(key, default=''):
+    c=db(); r=c.execute('SELECT value FROM store_settings WHERE key=?',(key,)).fetchone(); c.close()
+    return r['value'] if r else default
+
+def set_setting(key, value):
+    c=db(); c.execute('INSERT OR REPLACE INTO store_settings(key,value) VALUES(?,?)',(key,value)); c.commit(); c.close()
+
+def cart_items():
+    cart=session.get('cart',{}); items=[]; total=0; c=db()
+    for pid,qty in cart.items():
+        try: qty=int(qty)
+        except: continue
+        p=c.execute('SELECT * FROM products WHERE id=? AND active=1',(pid,)).fetchone()
+        if p and qty>0:
+            price=current_price(p); sub=price*qty; total+=sub
+            items.append({'product':p,'qty':qty,'price':price,'subtotal':sub})
+    c.close(); return items,total
+
+STYLE='''<style>*{box-sizing:border-box}body{margin:0;background:#080909;color:#eee;font-family:Arial,sans-serif}a{color:#e6c15a;text-decoration:none}header{padding:15px 4%;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #44371b;gap:12px;flex-wrap:wrap;background:#090909}.brand{font-size:25px;font-weight:900;color:#e6c15a;letter-spacing:2px}.nav{display:flex;gap:13px;flex-wrap:wrap;align-items:center}main{max-width:1200px;margin:auto;padding:22px 4%}.gold{color:#e6c15a}input,textarea,select{padding:11px;border-radius:8px;border:1px solid #55451e;background:#151515;color:#eee;width:100%;margin:5px 0}button,.btn{background:#c7a347;color:#111;font-weight:bold;border:0;padding:11px 15px;border-radius:8px;cursor:pointer;display:inline-block;margin:5px 0}.card{border:1px solid #332b19;background:#111;border-radius:13px;padding:14px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:15px}.product img{width:100%;height:220px;object-fit:cover;border-radius:9px}.price{font-size:19px;color:#e6c15a;font-weight:bold}.muted{color:#aaa;font-size:13px}.formrow{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.formrow>*{flex:1;min-width:140px}.wide{width:100%}table{width:100%;border-collapse:collapse;display:block;overflow:auto}td,th{padding:9px;border-bottom:1px solid #333;text-align:left;white-space:nowrap}video{width:100%;max-height:440px;border-radius:10px;background:#000}.gallery{display:flex;gap:9px;overflow:auto;padding:5px 0}.gallery img{width:120px;height:110px;object-fit:cover;border-radius:8px;cursor:pointer}.alert{padding:10px;background:#332715;border-radius:8px;margin:10px 0}.footer{padding:25px;text-align:center;color:#999}.hero{padding:20px 0}.adbox{margin:18px 0;border:1px solid #6b5526;padding:14px;border-radius:14px;background:#111}.featured{border-color:#c7a347}.oldprice{text-decoration:line-through;color:#999;font-size:14px}@media(max-width:600px){header{padding:12px}.brand{font-size:20px}main{padding:15px 3%}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.product img{height:155px}.card{padding:10px}.nav{font-size:13px;gap:8px}.formrow{display:block}.formrow>*{width:100%}}</style>'''
+
+def page(title, body):
+    return render_template_string('''<!doctype html><html lang="tg"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{title}} | NEXVORA</title>'''+STYLE+'''<header><a class="brand" href="{{url_for('home')}}">NEXVORA</a><nav class="nav"><a href="{{url_for('home')}}">🏠 Магазин</a><a href="{{url_for('cart')}}">🛒 Сабад</a><a href="{{url_for('favorites')}}">❤️ Дӯстдошта</a><a href="{{url_for('track')}}">📦 Tracking</a><a href="{{url_for('admin')}}">⚙️ Админ</a></nav></header><main>{% with messages=get_flashed_messages() %}{% if messages %}{% for msg in messages %}<div class="alert">{{msg}}</div>{% endfor %}{% endif %}{% endwith %}{{body|safe}}</main><div class="footer">NEXVORA STORE • Black & Gold</div></html>''',title=title,body=body)
+
+@app.route('/media/<path:filename>')
+def media(filename):
+    return send_from_directory(UPLOADS, filename)
+
+@app.route('/')
+def home():
+    search=request.args.get('q','').strip(); cat=request.args.get('cat',''); lo=request.args.get('min',''); hi=request.args.get('max',''); sort=request.args.get('sort','new')
+    c=db(); sql='SELECT * FROM products WHERE active=1'; args=[]
+    if search: sql+=' AND (name LIKE ? OR description LIKE ?)'; args += [f'%{search}%',f'%{search}%']
+    if cat: sql+=' AND category=?'; args.append(cat)
+    try:
+        if lo.strip(): sql+=' AND COALESCE(NULLIF(sale_price,0),price)>=?'; args.append(float(lo))
+        if hi.strip(): sql+=' AND COALESCE(NULLIF(sale_price,0),price)<=?'; args.append(float(hi))
+    except ValueError: pass
+    sql += ' ORDER BY price ASC' if sort=='cheap' else (' ORDER BY price DESC' if sort=='expensive' else ' ORDER BY id DESC')
+    products=c.execute(sql,args).fetchall(); cats=[r['category'] for r in c.execute('SELECT DISTINCT category FROM products WHERE active=1 ORDER BY category')]; c.close()
+    cards=''.join(f'''<div class="card product {'featured' if p['featured'] else ''}"><a href="{url_for('product',pid=p['id'])}"><img src="{url_for('media',filename=(get_images(p['id']) or [p['image']])[0])}" onerror="this.style.display='none'"><h3>{p['name']}</h3></a>{'<p class="gold">⭐ Махсус</p>' if p['featured'] else ''}<p class="price">{money(current_price(p))} сомонӣ {'<span class="oldprice">'+money(p['price'])+'</span>' if p['sale_price'] else ''}</p><p class="muted">{p['category']} • Анбор: {p['stock']}</p><form method="post" action="{url_for('cart_action',action='add',pid=p['id'])}">{token_field()}<button>Ба сабад</button></form><form method="post" action="{url_for('favorite_toggle',pid=p['id'])}">{token_field()}<button>♡ Дӯстдошта</button></form></div>''' for p in products)
+    ad_video=setting('ad_video'); ad_text=setting('ad_text'); ad_active=setting('ad_active')
+    video_ad=f'''<div class="adbox"><h2 class="gold">🎬 Рекламаи махсус</h2><p>{ad_text}</p><video controls muted playsinline><source src="{url_for('media',filename=ad_video)}"></video></div>''' if ad_video and ad_active=='1' else ''
+    body=f'''<div class="hero"><h1 class="gold">NEXVORA STORE</h1><p>Магазини онлайн • Сифат ва услуб</p></div>{video_ad}<form><div class="formrow"><input name="q" placeholder="Ҷустуҷӯи маҳсулот..." value="{search}"><select name="cat"><option value="">Ҳама категория</option>{''.join(f'<option value="{x}" {"selected" if cat==x else ""}>{x}</option>' for x in cats)}</select><input name="min" type="number" placeholder="Аз нарх" value="{lo}"><input name="max" type="number" placeholder="То нарх" value="{hi}"><select name="sort"><option value="new">Навтарин</option><option value="cheap" {'selected' if sort=='cheap' else ''}>Арзон</option><option value="expensive" {'selected' if sort=='expensive' else ''}>Қимат</option></select><button>Ҷустуҷӯ</button></div></form><div class="grid">{cards or '<p>Маҳсулот ёфт нашуд.</p>'}</div>'''
+    return page('Магазин',body)
+
+@app.route('/product/<int:pid>',methods=['GET','POST'])
+def product(pid):
+    p=get_product(pid)
+    if not p or not p['active']: abort(404)
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        try: rating=max(1,min(5,int(request.form.get('rating',5))))
+        except: rating=5
+        name=request.form.get('name','Меҳмон')[:80]; comment=request.form.get('comment','')[:1000]
+        c=db(); c.execute('INSERT INTO reviews(product_id,name,rating,comment) VALUES(?,?,?,?)',(pid,name,rating,comment)); c.commit(); c.close(); flash('Шарҳи шумо илова шуд!'); return redirect(url_for('product',pid=pid))
+    c=db(); reviews=c.execute('SELECT * FROM reviews WHERE product_id=? ORDER BY id DESC',(pid,)).fetchall(); avg=c.execute('SELECT AVG(rating) a FROM reviews WHERE product_id=?',(pid,)).fetchone()['a']; c.close()
+    imgs=get_images(pid) or ([p['image']] if p['image'] else [])
+    gallery=''.join(f'<a href="{url_for("media",filename=im)}" target="_blank"><img src="{url_for("media",filename=im)}"></a>' for im in imgs)
+    video=f'<video controls playsinline><source src="{url_for("media",filename=p["video"])}"></video>' if p['video'] else ''
+    reviews_html=''.join(f'<div class="card"><b>{r["name"]}</b> • {"⭐"*r["rating"]}<p>{r["comment"]}</p></div>' for r in reviews)
+    body=f'''<a href="/">← Бозгашт</a><h1>{p['name']}</h1><div class="gallery">{gallery}</div>{video}<p class="price">{money(current_price(p))} сомонӣ {'<span class="oldprice">'+money(p['price'])+'</span>' if p['sale_price'] else ''}</p><p>Категория: {p['category']} • Миқдор: {p['stock']}</p><p>{p['description']}</p><form method="post" action="{url_for('cart_action',action='add',pid=pid)}">{token_field()}<button>Ба сабад илова кардан</button></form><p>⭐ Рейтинг: {round(avg or 0,1)} / 5 ({len(reviews)} шарҳ)</p><h3>Шарҳ нависед</h3><form method="post">{token_field()}<div class="formrow"><input name="name" placeholder="Номи шумо"><select name="rating"><option>5</option><option>4</option><option>3</option><option>2</option><option>1</option></select></div><textarea class="wide" name="comment" placeholder="Шарҳ..."></textarea><button>Фиристодан</button></form><h3>Шарҳҳо</h3>{reviews_html}'''
+    return page(p['name'],body)
+
+@app.route('/favorite/toggle/<int:pid>',methods=['POST'])
+def favorite_toggle(pid):
+    if not valid_csrf(): abort(400)
+    fav=session.get('favorites',[]); key=str(pid)
+    if key in fav: fav.remove(key)
+    else: fav.append(key)
+    session['favorites']=fav; return redirect(request.referrer or url_for('home'))
+
+@app.route('/favorites')
+def favorites():
+    fav=session.get('favorites',[]); c=db(); ps=[]
+    for key in fav:
+        p=c.execute('SELECT * FROM products WHERE id=? AND active=1',(key,)).fetchone()
+        if p: ps.append(p)
+    c.close()
+    cards=''.join(f'<div class="card product"><a href="{url_for("product",pid=p["id"])}"><img src="{url_for("media",filename=(get_images(p["id"]) or [p["image"]])[0])}" onerror="this.style.display=\'none\'"><h3>{p["name"]}</h3></a><p class="price">{money(current_price(p))} сомонӣ</p></div>' for p in ps)
+    return page('Дӯстдошта',f'<h1>❤️ Дӯстдошта</h1><div class="grid">{cards or "Ҳоло маҳсулот нест."}</div>')
+
+@app.route('/cart')
+def cart():
+    items,total=cart_items(); discount=session.get('discount',0); promo=session.get('promo',''); fee=DELIVERY_FEE if items else 0
+    rows=''.join(f'''<div class="card"><b>{it['product']['name']}</b> • {it['qty']} дона • {money(it['subtotal'])} сомонӣ<form method="post" action="{url_for('cart_action',action='remove',pid=it['product']['id'])}">{token_field()}<button>Хориҷ</button></form></div>''' for it in items)
+    body=f'''<h1>🛒 Сабад</h1>{rows or 'Сабад холӣ аст.'}<p>Маблағ: {money(total)} сомонӣ</p><p>Тахфиф: {money(discount)} сомонӣ</p><p>Доставка: {money(fee)} сомонӣ</p><h2 class="gold">Ҳамагӣ: {money(max(0,total-discount)+fee)} сомонӣ</h2><form method="post" action="{url_for('apply_promo')}">{token_field()}<div class="formrow"><input name="code" placeholder="Промокод" value="{promo}"><button>Apply</button></div></form><a class="btn" href="/checkout">Оформить заказ</a>'''
+    return page('Сабад',body)
+
+@app.route('/cart/<action>/<int:pid>',methods=['POST'])
+def cart_action(action,pid):
+    if not valid_csrf(): abort(400)
+    p=get_product(pid); cart=session.get('cart',{}); k=str(pid)
+    if p and action=='add' and p['stock']>0: cart[k]=min(int(cart.get(k,0))+1,int(p['stock']))
+    elif action=='remove': cart.pop(k,None)
+    session['cart']=cart; return redirect(request.referrer or url_for('cart'))
+
+@app.route('/cart/promo',methods=['POST'])
+def apply_promo():
+    if not valid_csrf(): abort(400)
+    c=db(); row=c.execute('SELECT * FROM promos WHERE code=? AND active=1',(request.form.get('code','').upper(),)).fetchone(); c.close()
+    if row:
+        _,total=cart_items(); session['discount']=min(total,float(row['discount'])); session['promo']=row['code']; flash('Промокод қабул шуд!')
+    else: session['discount']=0; session['promo']=''; flash('Промокод нодуруст аст.')
+    return redirect(url_for('cart'))
+
+@app.route('/checkout',methods=['GET','POST'])
+def checkout():
+    items,total=cart_items()
+    if not items: return redirect(url_for('cart'))
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        name=request.form.get('name','').strip(); phone=request.form.get('phone','').strip(); address=request.form.get('address','').strip(); note=request.form.get('note','')[:500]
+        if not name or not phone or not address: flash('Ном, телефон ва адресро пур кунед.'); return redirect(url_for('checkout'))
+        c=db()
+        for it in items:
+            cur=c.execute('SELECT stock FROM products WHERE id=?',(it['product']['id'],)).fetchone()
+            if not cur or cur['stock']<it['qty']: c.close(); flash('Миқдори маҳсулот кам аст.'); return redirect(url_for('cart'))
+        for it in items: c.execute('UPDATE products SET stock=stock-? WHERE id=?',(it['qty'],it['product']['id']))
+        disc=min(total,float(session.get('discount',0))); fee=DELIVERY_FEE; final=max(0,total-disc)+fee
+        items_json=json.dumps([{'id':it['product']['id'],'name':it['product']['name'],'qty':it['qty'],'price':it['price']} for it in items],ensure_ascii=False)
+        c.execute('INSERT INTO orders(customer_name,phone,address,note,items_json,total,status,discount,promo,delivery_fee) VALUES(?,?,?,?,?,?,?,?,?,?)',(name,phone,address,note,items_json,final,'Нав',disc,session.get('promo',''),fee))
+        oid=c.execute('SELECT last_insert_rowid()').fetchone()[0]; c.commit(); c.close(); session['cart']={}; session['discount']=0; session['promo']=''
+        wa=f'Салом! Заказ #{oid}. Ном: {name}. Телефон: {phone}. Адрес: {address}. Маблағ: {money(final)} сомонӣ.'
+        return redirect(url_for('done',oid=oid,wa=wa))
+    body=f'''<h1>Оформление заказа</h1><p>Ҳамагӣ: {money(total-min(total,session.get('discount',0))+DELIVERY_FEE)} сомонӣ (доставка {DELIVERY_FEE})</p><form method="post">{token_field()}<input class="wide" name="name" placeholder="Ном" required><input class="wide" name="phone" placeholder="Телефон" required><input class="wide" name="address" placeholder="Адрес" required><textarea class="wide" name="note" placeholder="Эзоҳ"></textarea><button>Фармоиш додан</button></form>'''
+    return page('Checkout',body)
+
+@app.route('/done/<int:oid>')
+def done(oid):
+    wa_text=request.args.get('wa',f'Order #{oid}'); wa_link=f'https://wa.me/{WHATSAPP_NUMBER}?text={quote(wa_text)}'
+    return page('Фармоиш',f'<h1 class="gold">Фармоиш қабул шуд!</h1><p>Рақами фармоиш: #{oid}</p><p>Ин рақамро нигоҳ доред барои tracking.</p><a class="btn" href="{url_for("track",oid=oid)}">Пайгирии фармоиш</a><p><a href="{wa_link}" target="_blank" rel="noopener">Фиристодани фармоиш ба WhatsApp</a></p>')
+
+@app.route('/track',methods=['GET','POST'])
+def track():
+    oid=request.args.get('oid') or request.form.get('oid',''); order=None
+    if oid:
+        try:
+            c=db(); order=c.execute('SELECT * FROM orders WHERE id=?',(int(oid),)).fetchone(); c.close()
+        except: order=None
+    body=f'<h1>📦 Tracking</h1><form method="post"><div class="formrow"><input name="oid" placeholder="Рақами фармоиш" value="{oid}"><button>Пайгирӣ</button></div></form>'
+    if order: body+=f'<div class="card"><h2>Фармоиш #{order["id"]}</h2><p>Ном: {order["customer_name"]}</p><p>Ҳолат: <b class="gold">{order["status"]}</b></p><p>Ҳамагӣ: {money(order["total"])} сомонӣ</p><p>Сана: {order["created_at"]}</p></div>'
+    elif oid: body+='<p>Фармоиш ёфт нашуд.</p>'
+    return page('Tracking',body)
+
+@app.route('/login',methods=['GET','POST'])
+def login():
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        pw=request.form.get('password',''); stored=os.environ.get('ADMIN_PASSWORD_HASH')
+        ok=check_password_hash(stored,pw) if stored else secrets.compare_digest(pw,ADMIN_PASSWORD)
+        if ok: session['admin']=True; return redirect(url_for('admin'))
+        flash('Парол нодуруст аст.')
+    return page('Админ',f'<h1>Admin login</h1><form method="post">{token_field()}<input type="password" name="password" placeholder="Парол"><button>Ворид шудан</button></form>')
+
+@app.route('/logout')
+def logout(): session.pop('admin',None); return redirect('/')
+
+@app.route('/admin')
+@admin_required
+def admin():
+    c=db(); products=c.execute('SELECT * FROM products ORDER BY id DESC').fetchall(); orders=c.execute('SELECT * FROM orders ORDER BY id DESC').fetchall(); new=c.execute("SELECT COUNT(*) n FROM orders WHERE status='Нав'").fetchone()['n']; visits=c.execute('SELECT COUNT(*) n FROM hits').fetchone()['n']; revenue=c.execute("SELECT COALESCE(SUM(total),0) s FROM orders WHERE status!='Бекор'").fetchone()['s']; c.close()
+    rows=''.join(f'<tr><td>{p["id"]}</td><td>{p["name"]}</td><td>{money(p["price"])} сом</td><td>{p["stock"]}</td><td>{"Фаъол" if p["active"] else "Пинҳон"}</td><td><a href="{url_for("edit_product",pid=p["id"])}">Таҳрир</a><form style="display:inline" method="post" action="{url_for("delete_product",pid=p["id"])}">{token_field()}<button>Нест кардан</button></form></td></tr>' for p in products)
+    order_rows=''.join(f'<tr><td>#{o["id"]}</td><td>{o["customer_name"]}</td><td>{money(o["total"])} сом</td><td>{o["status"]}</td><td><a href="{url_for("order_admin",oid=o["id"])}">Дидан</a></td></tr>' for o in orders)
+    body=f'''<h1>⚙️ Админ панел <a href="/logout">Logout</a></h1><div class="grid"><div class="card">📦 Маҳсулот: {len(products)}</div><div class="card">🔔 Фармоиши нав: <b class="gold">{new}</b></div><div class="card">💰 Даромад: {money(revenue)} сомонӣ</div><div class="card">👁️ Боздид: {visits}</div></div><h2>➕ Иловаи маҳсулот</h2><form method="post" action="/admin/add" enctype="multipart/form-data" class="card">{token_field()}<div class="formrow"><input name="name" placeholder="Ном" required><input name="price" type="number" step="0.01" placeholder="Нарх" required><input name="sale_price" type="number" step="0.01" placeholder="Нархи тахфиф"></div><div class="formrow"><input name="category" placeholder="Категория"><input name="stock" type="number" placeholder="Миқдор"><input name="description" placeholder="Тавсиф"></div><label>Суратҳо (якчанд интихоб кардан мумкин):</label><input type="file" name="images" multiple accept="image/jpeg,image/png,image/webp"><label>Видео барои маҳсулот:</label><input type="file" name="video" accept="video/mp4,video/webm"><label><input type="checkbox" name="featured" value="1" style="width:auto"> Маҳсулоти махсус</label><button>Илова кардан</button></form><h2>🎬 Рекламаи видеоӣ</h2><form method="post" action="/admin/video-ad" enctype="multipart/form-data" class="card">{token_field()}<label>Видео (MP4 ё WebM)</label><input type="file" name="ad_video" accept="video/mp4,video/webm"><textarea name="ad_text" placeholder="Матни реклама">{setting('ad_text')}</textarea><label><input type="checkbox" name="active" value="1" style="width:auto" {'checked' if setting('ad_active')=='1' else ''}> Реклама фаъол бошад</label><button>Сабт кардани реклама</button></form><h2>Маҳсулотҳо</h2><table><tr><th>ID</th><th>Ном</th><th>Нарх</th><th>Миқдор</th><th>Ҳолат</th><th>Идора</th></tr>{rows}</table><h2>Фармоишҳо</h2><table><tr><th>ID</th><th>Ном</th><th>Маблағ</th><th>Ҳолат</th><th></th></tr>{order_rows}</table><p><a class="btn" href="/admin/export.csv">⬇️ Export фармоишҳо CSV</a></p><h2>Промокод</h2><form method="post" action="/admin/promo">{token_field()}<div class="formrow"><input name="code" placeholder="Код"><input name="discount" type="number" placeholder="Тахфиф (сомонӣ)"><button>Создан</button></div></form>'''
+    return page('Админ',body)
+
+@app.route('/admin/add',methods=['POST'])
+@admin_required
+def add_product():
+    if not valid_csrf(): abort(400)
+    name=request.form.get('name','').strip(); price=float(request.form.get('price',0) or 0); sale=float(request.form.get('sale_price',0) or 0)
+    # Corrected below in deployed source: parse values safely
+    cat=request.form.get('category','Дигар') or 'Дигар'; stock=max(0,int(request.form.get('stock',0) or 0)); desc=request.form.get('description','')[:3000]
+    imgs=[media_save(f,ALLOWED_IMAGES) for f in request.files.getlist('images')]; imgs=[x for x in imgs if x]
+    vid=media_save(request.files.get('video'),ALLOWED_VIDEOS); featured=1 if request.form.get('featured')=='1' else 0
+    c=db(); c.execute('INSERT INTO products(name,price,image,category,description,stock,sale_price,video,featured) VALUES(?,?,?,?,?,?,?,?,?)',(name,price,imgs[0] if imgs else '',cat,desc,stock,sale,vid,featured)); pid=c.execute('SELECT last_insert_rowid()').fetchone()[0]
+    for i,im in enumerate(imgs): c.execute('INSERT INTO product_images(product_id,filename,position) VALUES(?,?,?)',(pid,im,i))
+    c.commit(); c.close(); flash('Маҳсулот илова шуд!'); return redirect('/admin')
+
+@app.route('/admin/edit/<int:pid>',methods=['GET','POST'])
+@admin_required
+def edit_product(pid):
+    p=get_product(pid)
+    if not p: abort(404)
+    if request.method=='POST':
+        if not valid_csrf(): abort(400)
+        name=request.form.get('name','').strip(); price=float(request.form.get('price',0) or 0); stock=max(0,int(request.form.get('stock',0) or 0)); cat=request.form.get('category','Дигар'); desc=request.form.get('description','')[:3000]; sale=float(request.form.get('sale_price',0) or 0); featured=1 if request.form.get('featured')=='1' else 0; active=1 if request.form.get('active')=='1' else 0
+        imgs=[media_save(f,ALLOWED_IMAGES) for f in request.files.getlist('images')]; imgs=[x for x in imgs if x]; vid=media_save(request.files.get('video'),ALLOWED_VIDEOS)
+        c=db(); c.execute('UPDATE products SET name=?,price=?,stock=?,category=?,description=?,sale_price=?,featured=?,active=? WHERE id=?',(name,price,stock,cat,desc,sale,featured,active,pid))
+        if imgs:
+            for im in imgs: c.execute('INSERT INTO product_images(product_id,filename,position) VALUES(?,?,99)',(pid,im))
+            c.execute('UPDATE products SET image=? WHERE id=?',(imgs[0],pid))
+        if vid: c.execute('UPDATE products SET video=? WHERE id=?',(vid,pid))
+        c.commit(); c.close(); flash('Тағйирот сабт шуд!'); return redirect('/admin')
+    gallery=''.join(f'<img style="width:90px;height:80px;object-fit:cover" src="{url_for("media",filename=im)}">' for im in get_images(pid))
+    return page('Edit',f'''<h1>Таҳрири маҳсулот</h1><div class="gallery">{gallery}</div><form method="post" enctype="multipart/form-data" class="card">{token_field()}<input name="name" value="{p['name']}" placeholder="Ном"><input name="price" type="number" step="0.01" value="{p['price']}"><input name="sale_price" type="number" step="0.01" value="{p['sale_price']}"><input name="stock" type="number" value="{p['stock']}"><input name="category" value="{p['category']}"><textarea name="description">{p['description']}</textarea><label>Илова кардани суратҳои нав (якчанд)</label><input type="file" name="images" multiple accept="image/*"><label>Иваз кардани видео</label><input type="file" name="video" accept="video/mp4,video/webm"><label><input type="checkbox" name="featured" value="1" style="width:auto" {'checked' if p['featured'] else ''}> Маҳсулоти махсус</label><label><input type="checkbox" name="active" value="1" style="width:auto" {'checked' if p['active'] else ''}> Дар магазин нишон дода шавад</label><button>Сабт кардан</button></form>''')
+
+@app.route('/admin/delete/<int:pid>',methods=['POST'])
+@admin_required
+def delete_product(pid):
+    if not valid_csrf(): abort(400)
+    c=db(); c.execute('DELETE FROM products WHERE id=?',(pid,)); c.execute('DELETE FROM product_images WHERE product_id=?',(pid,)); c.execute('DELETE FROM reviews WHERE product_id=?',(pid,)); c.commit(); c.close(); flash('Маҳсулот нест карда шуд.'); return redirect('/admin')
+
+@app.route('/admin/promo',methods=['POST'])
+@admin_required
+def promo_add():
+    if not valid_csrf(): abort(400)
+    code=request.form.get('code','').strip().upper(); discount=float(request.form.get('discount',0) or 0)
+    if code and discount>0:
+        c=db(); c.execute('INSERT OR REPLACE INTO promos(code,discount,active) VALUES(?,?,1)',(code,discount)); c.commit(); c.close(); flash('Промокод сабт шуд!')
+    return redirect('/admin')
+
+@app.route('/admin/video-ad',methods=['POST'])
+@admin_required
+def save_video_ad():
+    if not valid_csrf(): abort(400)
+    video=request.files.get('ad_video'); text=request.form.get('ad_text','')[:1000]; active='1' if request.form.get('active')=='1' else '0'
+    if video and video.filename:
+        new_video=media_save(video,ALLOWED_VIDEOS)
+        if new_video: set_setting('ad_video',new_video)
+        else: flash('Формати видео қабул нест. MP4 ё WebM интихоб кунед.')
+    set_setting('ad_text',text); set_setting('ad_active',active); flash('Танзимоти реклама сабт шуд!'); return redirect('/admin')
+
+@app.route('/admin/order/<int:oid>')
+@admin_required
+def order_admin(oid):
+    c=db(); o=c.execute('SELECT * FROM orders WHERE id=?',(oid,)).fetchone(); c.close()
+    if not o: abort(404)
+    return page('Фармоиш',f'<h1>Фармоиш #{oid}</h1><p>{o["customer_name"]} • {o["phone"]} • {o["address"]}</p><p>Маблағ: {money(o["total"])} сомонӣ</p><pre>{o["items_json"]}</pre><form method="post" action="{url_for("order_status",oid=oid)}">{token_field()}<select name="status"><option>Нав</option><option>Қабул шуд</option><option>Дар роҳ</option><option>Расонида шуд</option><option>Бекор</option></select><button>Тағйир додан</button></form>')
+
+@app.route('/admin/order/<int:oid>/status',methods=['POST'])
+@admin_required
+def order_status(oid):
+    if not valid_csrf(): abort(400)
+    status=request.form.get('status','Нав'); c=db(); o=c.execute('SELECT * FROM orders WHERE id=?',(oid,)).fetchone()
+    if o:
+        if status=='Бекор' and not o['stock_restored']:
+            try:
+                for it in json.loads(o['items_json']): c.execute('UPDATE products SET stock=stock+? WHERE id=?',(int(it.get('qty',0)),int(it.get('id',0))))
+            except: pass
+            c.execute('UPDATE orders SET stock_restored=1,status=? WHERE id=?',(status,oid))
+        elif o['stock_restored'] and status!='Бекор':
+            try:
+                for it in json.loads(o['items_json']): c.execute('UPDATE products SET stock=MAX(0,stock-?) WHERE id=?',(int(it.get('qty',0)),int(it.get('id',0))))
+            except: pass
+            c.execute('UPDATE orders SET stock_restored=0,status=? WHERE id=?',(status,oid))
+        else: c.execute('UPDATE orders SET status=? WHERE id=?',(status,oid))
+    c.commit(); c.close(); return redirect(url_for('order_admin',oid=oid))
+
+@app.route('/admin/export.csv')
+@admin_required
+def export_csv():
+    c=db(); rows=c.execute('SELECT * FROM orders ORDER BY id DESC').fetchall(); c.close()
+    output=io.StringIO(); w=csv.writer(output); w.writerow(['id','name','phone','address','total','status','created'])
+    for r in rows: w.writerow([r['id'],r['customer_name'],r['phone'],r['address'],r['total'],r['status'],r['created_at']])
+    return Response(output.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=orders.csv'})
+
+@app.errorhandler(413)
+def too_large(e): return page('Хатогӣ','Файл калон аст. Лутфан видеои хурдтар интихоб кунед.'),413
+
+@app.errorhandler(500)
+def server_error(e): return page('Хатогӣ','Сервер хатогӣ дод. Logs-ро санҷед.'),500
+
+if __name__=='__main__':
+    app.run(host='0.0.0.0',port=int(os.environ.get('PORT',5000)),debug=False)
