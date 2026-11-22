@@ -9,7 +9,7 @@ from datetime import datetime
 app=Flask(__name__); app.secret_key=os.environ.get('SECRET_KEY') or secrets.token_hex(32)
 app.config.update(MAX_CONTENT_LENGTH=80*1024*1024,SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax')
 BASE=Path(__file__).resolve().parent; UP=BASE/'static'/'uploads'; UP.mkdir(parents=True,exist_ok=True); DB=BASE/'nexvora_pro.db'; JSON_FILE=BASE/'products.json'
-PHONE=''.join(c for c in os.environ.get('WHATSAPP_NUMBER','992919186336') if c.isdigit()); ADMIN=os.environ.get('ADMIN_PASSWORD','jura2010')
+PHONE=''.join(c for c in os.environ.get('WHATSAPP_NUMBER','992919186336') if c.isdigit()); ADMIN=os.environ.get('ADMIN_PASSWORD','')
 IMG={'jpg','jpeg','png','webp','gif'}; VID={'mp4','webm'}; LANGS={'tg','ru','en'}
 T={
 'tg':{'shop':'Мағоза','search':'Ҷустуҷӯ','cart':'Сабад','fav':'Дӯстдоштаҳо','compare':'Муқоиса','track':'Пайгирӣ','admin':'Admin','add':'Илова кардан','buy':'Харидан','price':'Нарх','category':'Категория','desc':'Тавсиф','stock':'Анбор','empty':'Маҳсулот нест','checkout':'Фармоиш','name':'Ном','phone':'Телефон','address':'Суроға','note':'Эзоҳ','send':'Фиристодан','promo':'Промокод','apply':'Истифода','total':'Ҳамагӣ','review':'Шарҳ','question':'Савол','cash':'Нақдӣ','status':'Ҳолат','all':'Ҳама','remove':'Нест кардан','orderok':'Фармоиш қабул шуд','added':'Ба сабад илова шуд'},
