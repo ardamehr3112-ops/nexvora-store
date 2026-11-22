@@ -1,289 +1,238 @@
-from flask import Flask, request, redirect, render_template_string, session, flash, abort, jsonify, Response, make_response
+
+from flask import Flask, request, redirect, render_template_string
 from werkzeug.utils import secure_filename
-from werkzeug.security import generate_password_hash, check_password_hash
-import os,json,uuid,sqlite3,secrets,hmac,csv,io
-from pathlib import Path
-from urllib.parse import quote
-from datetime import datetime
+import os
+import json
+import uuid
 
-app=Flask(__name__); app.secret_key=os.environ.get('SECRET_KEY') or secrets.token_hex(32)
-app.config.update(MAX_CONTENT_LENGTH=80*1024*1024,SESSION_COOKIE_HTTPONLY=True,SESSION_COOKIE_SAMESITE='Lax')
-BASE=Path(__file__).resolve().parent; UP=BASE/'static'/'uploads'; UP.mkdir(parents=True,exist_ok=True); DB=BASE/'nexvora_pro.db'; JSON_FILE=BASE/'products.json'
-PHONE=''.join(c for c in os.environ.get('WHATSAPP_NUMBER','992919186336') if c.isdigit()); ADMIN=os.environ.get('ADMIN_PASSWORD','')
-IMG={'jpg','jpeg','png','webp','gif'}; VID={'mp4','webm'}; LANGS={'tg','ru','en'}
-T={
-'tg':{'shop':'Мағоза','search':'Ҷустуҷӯ','cart':'Сабад','fav':'Дӯстдоштаҳо','compare':'Муқоиса','track':'Пайгирӣ','admin':'Admin','add':'Илова кардан','buy':'Харидан','price':'Нарх','category':'Категория','desc':'Тавсиф','stock':'Анбор','empty':'Маҳсулот нест','checkout':'Фармоиш','name':'Ном','phone':'Телефон','address':'Суроға','note':'Эзоҳ','send':'Фиристодан','promo':'Промокод','apply':'Истифода','total':'Ҳамагӣ','review':'Шарҳ','question':'Савол','cash':'Нақдӣ','status':'Ҳолат','all':'Ҳама','remove':'Нест кардан','orderok':'Фармоиш қабул шуд','added':'Ба сабад илова шуд'},
-'ru':{'shop':'Магазин','search':'Поиск','cart':'Корзина','fav':'Избранное','compare':'Сравнение','track':'Отслеживание','admin':'Admin','add':'Добавить','buy':'Купить','price':'Цена','category':'Категория','desc':'Описание','stock':'Остаток','empty':'Товаров нет','checkout':'Оформление','name':'Имя','phone':'Телефон','address':'Адрес','note':'Примечание','send':'Отправить','promo':'Промокод','apply':'Применить','total':'Итого','review':'Отзыв','question':'Вопрос','cash':'Наличные','status':'Статус','all':'Все','remove':'Удалить','orderok':'Заказ принят','added':'Добавлено в корзину'},
-'en':{'shop':'Shop','search':'Search','cart':'Cart','fav':'Favorites','compare':'Compare','track':'Tracking','admin':'Admin','add':'Add','buy':'Buy','price':'Price','category':'Category','desc':'Description','stock':'Stock','empty':'No products','checkout':'Checkout','name':'Name','phone':'Phone','address':'Address','note':'Note','send':'Send','promo':'Promo code','apply':'Apply','total':'Total','review':'Review','question':'Question','cash':'Cash','status':'Status','all':'All','remove':'Remove','orderok':'Order accepted','added':'Added to cart'}}
-def t(k):return T.get(session.get('lang','tg'),T['tg']).get(k,k)
-app.jinja_env.globals['t']=t
+app = Flask(__name__)
 
-def db():
- c=sqlite3.connect(DB,timeout=25);c.row_factory=sqlite3.Row;c.execute('PRAGMA foreign_keys=ON');return c
-with db() as c:
- c.executescript('''CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY,name TEXT,price REAL,old_price REAL DEFAULT 0,sale_price REAL DEFAULT 0,category TEXT,description TEXT,images TEXT DEFAULT '[]',video TEXT DEFAULT '',stock INTEGER DEFAULT 0,featured INTEGER DEFAULT 0,active INTEGER DEFAULT 1,scheduled TEXT DEFAULT '',seller TEXT DEFAULT 'NEXVORA',created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY,customer TEXT,phone TEXT,address TEXT,note TEXT,items TEXT,subtotal REAL,discount REAL DEFAULT 0,delivery REAL DEFAULT 0,total REAL,promo TEXT DEFAULT '',payment TEXT DEFAULT 'cash',status TEXT DEFAULT 'Қабул шуд',created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS promos(code TEXT PRIMARY KEY,discount REAL,kind TEXT DEFAULT 'amount',active INTEGER DEFAULT 1);
- CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY,product_id INTEGER,customer TEXT,stars INTEGER,body TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS questions(id INTEGER PRIMARY KEY,product_id INTEGER,customer TEXT,body TEXT,answer TEXT DEFAULT '',created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY,product_id INTEGER,customer TEXT,stars INTEGER,body TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
- CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY,action TEXT,detail TEXT,created TEXT DEFAULT CURRENT_TIMESTAMP);
- CREATE TABLE IF NOT EXISTS giftcards(code TEXT PRIMARY KEY,amount REAL,remaining REAL,active INTEGER DEFAULT 1);
- CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,name TEXT,phone TEXT UNIQUE,password_hash TEXT,points INTEGER DEFAULT 0,referral TEXT UNIQUE);
- CREATE TABLE IF NOT EXISTS sellers(id INTEGER PRIMARY KEY,name TEXT,phone TEXT UNIQUE,description TEXT DEFAULT '',active INTEGER DEFAULT 1);''')
- for k,v in {'banner':'NEXVORA — Хариди осон','delivery':'0','flash_percent':'0','flash_until':'','ref_bonus':'10'}.items():c.execute('INSERT OR IGNORE INTO settings VALUES(?,?)',(k,v))
- # Import legacy JSON products, without duplicating on each startup
- if JSON_FILE.exists() and c.execute('select count(*) from products').fetchone()[0]==0:
-  try:
-   for p in json.loads(JSON_FILE.read_text(encoding='utf-8')):c.execute('INSERT INTO products(name,price,images,category,stock) VALUES(?,?,?,?,?)',(p.get('name',''),float(p.get('price',0)),json.dumps([p['image']] if p.get('image') else []),p.get('category','Дигар'),int(p.get('stock',99))))
-  except Exception:pass
+BASE = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE, "static", "uploads")
+DATA_FILE = os.path.join(BASE, "products.json")
 
-def setting(k,default=''):
- with db() as c:r=c.execute('select value from settings where key=?',(k,)).fetchone();return r['value'] if r else default
-def log(a,d=''):
- with db() as c:c.execute('insert into logs(action,detail) values(?,?)',(a,str(d)[:400]))
-def csrf():
- if 'csrf' not in session:session['csrf']=secrets.token_hex(24)
- return session['csrf']
-app.jinja_env.globals['csrf']=csrf
-@app.before_request
-def csrf_guard():
- if request.method=='POST' and request.form.get('csrf')!=session.get('csrf'):abort(400,'CSRF token invalid')
-def adminok():return bool(session.get('admin'))
-def ext(f):return f.filename.rsplit('.',1)[-1].lower() if f and '.' in f.filename else ''
-def uploads(files,allowed):
- saved=[]
- for f in files:
-  if f and f.filename and ext(f) in allowed:
-   name=uuid.uuid4().hex+'.'+ext(f);f.save(UP/name);saved.append(name)
- return saved
-def product(pid):
- with db() as c:r=c.execute('select * from products where id=? and active=1',(pid,)).fetchone();return dict(r) if r else None
-def products():
- with db() as c:return [dict(r) for r in c.execute("select * from products where active=1 and (scheduled='' or scheduled<=datetime('now')) order by featured desc,id desc")]
-def imgs(p):
- try:return json.loads(p.get('images') or '[]')
- except:return []
-def effective(p):return float(p.get('sale_price') or p.get('price') or 0)
-def money(x):return ('%.2f'%float(x)).rstrip('0').rstrip('.')
-def cart():return session.setdefault('cart',{})
-def cart_rows():
- rows=[];total=0
- for k,q in cart().items():
-  p=product(int(k))
-  if p:
-   q=max(1,min(int(q),max(1,int(p['stock'] or 99))));rows.append((p,q,effective(p)*q));total+=effective(p)*q
- return rows,total
-def viewed():return [p for i in session.get('viewed',[]) if (p:=product(i))]
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-def card(p):
- im=imgs(p);src=('/static/uploads/'+im[0]) if im else ''
- return render_template_string('''<article class=card><a href=/p/{{p.id}}>{% if src %}<img src="{{src}}" loading=lazy>{% else %}<div class=placeholder>NEXVORA</div>{% endif %}</a><h3>{{p.name}}</h3><small>{{p.category}} · 📦 {{p.stock}}</small><p class=price>{{price}} сомонӣ</p>{% if p.old_price %}<del>{{p.old_price}}</del>{% endif %}<div class=row><a class=btn href=/p/{{p.id}}>👁 Quick view</a><form method=post action=/cart/add/{{p.id}}><input type=hidden name=csrf value={{csrf()}}><button class=btn green>{{t('buy')}}</button></form><a class=btn href=/fav/{{p.id}}>♡</a><a class=btn href=/compare/add/{{p.id}}>⚖</a></div></article>''',p=p,src=src,price=money(effective(p)))
-BASEHTML='''<!doctype html><html lang="{{session.get('lang','tg')}}"><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=theme-color content=#0b0b0c><link rel=manifest href=/manifest.json><title>{{title}}</title><style>*{box-sizing:border-box}body{margin:0;background:#09090b;color:#f6f6f6;font-family:Arial}a{color:inherit;text-decoration:none}header{position:sticky;top:0;background:#121216ee;border-bottom:1px solid #393434;z-index:4}.nav{max-width:1100px;margin:auto;padding:12px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.logo{font-size:22px;font-weight:bold;letter-spacing:3px;color:#e8c958}.links{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.links a,.btn{display:inline-block;padding:9px 11px;border-radius:9px;background:#242429;border:1px solid #444}.wrap{max-width:1100px;margin:auto;padding:14px}.hero,.panel,.card{background:#19191d;border:1px solid #4b4230;border-radius:15px;padding:15px;margin:12px 0}.hero{text-align:center;background:linear-gradient(120deg,#18181b,#292317)}h1{color:#e8c958}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.card img{width:100%;height:210px;object-fit:contain;background:#0e0e10;border-radius:10px}.placeholder{height:210px;display:grid;place-items:center;color:#888}.price{color:#e8c958;font-size:20px;font-weight:bold}.old{color:#999;text-decoration:line-through}.input,select,textarea{width:100%;background:#101014;color:white;border:1px solid #444;border-radius:9px;padding:12px;margin:6px 0}.btn{cursor:pointer;background:#e8c958;color:#111;font-weight:bold;border:0}.green{background:#198a4a;color:white}.red{background:#a33;color:white}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row form{margin:0}.thumbs{display:flex;gap:6px;overflow:auto}.thumbs img{width:70px;height:70px;object-fit:cover;border-radius:8px}.flash{background:#393022;padding:12px;border-radius:9px;margin:8px 0}video{width:100%;max-height:420px;border-radius:12px}footer{text-align:center;color:#777;padding:30px}.small{color:#aaa;font-size:13px}.stars{color:#f5d55e}@media(max-width:500px){.links{gap:3px}.links a{padding:7px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card img{height:150px}.logo{font-size:18px}} </style></head><body><header><div class=nav><a class=logo href=/>NEXVORA</a><div class=links><a href=/>{{t('shop')}}</a><a href=/cart>{{t('cart')}} ({{cartcount}})</a><a href=/favorites>{{t('fav')}}</a><a href=/compare>{{t('compare')}}</a><a href=/track>{{t('track')}}</a><a href=/admin>{{t('admin')}}</a><form method=post action=/lang style="margin:0"><input type=hidden name=csrf value={{csrf()}}><select name=lang onchange=this.form.submit() style="width:auto;margin:0;padding:7px"><option value=tg {% if session.get('lang','tg')=='tg' %}selected{% endif %}>🇹🇯 TG</option><option value=ru {% if session.get('lang')=='ru' %}selected{% endif %}>🇷🇺 RU</option><option value=en {% if session.get('lang')=='en' %}selected{% endif %}>🇬🇧 EN</option></select></form></div></div></header><main class=wrap>{% for m in get_flashed_messages() %}<div class=flash>{{m}}</div>{% endfor %}{{body|safe}}</main><footer>NEXVORA STORE · 2026</footer><script>if('serviceWorker'in navigator)navigator.serviceWorker.register('/sw.js');function voice(){let R=window.SpeechRecognition||window.webkitSpeechRecognition;if(!R){alert('Voice search unsupported');return}let r=new R();r.lang=document.documentElement.lang==='ru'?'ru-RU':document.documentElement.lang==='en'?'en-US':'tg-TJ';r.onresult=e=>{document.querySelector('#q').value=e.results[0][0].transcript;document.querySelector('#search').submit()};r.start()}</script></body></html>'''
-def page(body,title='NEXVORA',**kw):return render_template_string(BASEHTML,body=body,title=title,cartcount=sum(int(v) for v in cart().values()),**kw)
-@app.post('/lang')
-def lang():session['lang']=request.form.get('lang') if request.form.get('lang') in LANGS else 'tg';return redirect(request.referrer or '/')
-LANGS=('tg','ru','en')
-@app.route('/')
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024
+
+WHATSAPP_NUMBER = "992919186336"
+
+ALLOWED = {"png", "jpg", "jpeg", "webp"}
+
+def load_products():
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+products = load_products()
+
+def save_products():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(products, f, ensure_ascii=False, indent=4)
+
+HTML = """
+<!DOCTYPE html>
+<html lang="tg">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+content="width=device-width, initial-scale=1">
+
+<title>NEXVORA STORE</title>
+
+<style>
+* { box-sizing: border-box; }
+
+body {
+    background: #080808;
+    color: white;
+    font-family: Arial;
+    text-align: center;
+    padding: 15px;
+    margin: 0;
+}
+
+h1 {
+    color: gold;
+    font-size: 38px;
+    margin-top: 35px;
+}
+
+.card {
+    background: #181818;
+    border: 1px solid #b99735;
+    border-radius: 18px;
+    padding: 20px;
+    margin: 18px 0;
+}
+
+input {
+    width: 95%;
+    padding: 15px;
+    margin: 9px 0;
+    border-radius: 10px;
+    border: none;
+    font-size: 16px;
+}
+
+button {
+    width: 95%;
+    padding: 16px;
+    background: gold;
+    border: none;
+    border-radius: 10px;
+    font-weight: bold;
+    font-size: 16px;
+    margin-top: 12px;
+}
+
+.price {
+    color: gold;
+    font-size: 22px;
+}
+
+.product-img {
+    width: 100%;
+    max-height: 260px;
+    object-fit: contain;
+    border-radius: 12px;
+    background: #101010;
+}
+
+.buy {
+    display: block;
+    background: #159b50;
+    color: white;
+    padding: 15px;
+    border-radius: 10px;
+    text-decoration: none;
+    margin-top: 15px;
+    font-weight: bold;
+}
+
+footer {
+    color: #888;
+    margin: 40px 0;
+}
+
+.file-label {
+    display: block;
+    background: white;
+    color: #222;
+    padding: 15px;
+    border-radius: 10px;
+    margin: 10px auto;
+    width: 95%;
+    text-align: left;
+}
+</style>
+</head>
+
+<body>
+
+<h1>NEXVORA</h1>
+<p>PREMIUM ONLINE STORE</p>
+
+<div class="card">
+
+<h2>Илова кардани маҳсулот</h2>
+
+<form method="POST" enctype="multipart/form-data">
+
+<input name="name"
+placeholder="Номи маҳсулот" required>
+
+<input name="price"
+type="number" min="0" step="0.01"
+placeholder="Нарх (сомонӣ)" required>
+
+<label class="file-label">
+Акси маҳсулот:
+<input name="image"
+type="file" accept="image/*">
+</label>
+
+<button type="submit">
+ИЛОВА КАРДАН
+</button>
+
+</form>
+</div>
+
+<h2>МАҲСУЛОТИ МО</h2>
+
+{% for p in products %}
+
+<div class="card">
+
+{% if p.image %}
+<img class="product-img"
+src="{{ url_for('static', filename='uploads/' + p.image) }}">
+{% endif %}
+
+<h3>{{ p.name }}</h3>
+
+<p class="price">
+{{ p.price }} сомонӣ
+</p>
+
+<a class="buy"
+href="https://wa.me/{{ phone }}?text={{ ('Салом! Ман мехоҳам '+p.name+'-ро харам.')|urlencode }}"
+target="_blank">
+ХАРИДАН ТАВАССУТИ WHATSAPP
+</a>
+
+</div>
+
+{% else %}
+<p>Ҳоло маҳсулот нест.</p>
+{% endfor %}
+
+<footer>NEXVORA © 2026</footer>
+
+</body>
+</html>
+"""
+
+@app.route("/", methods=["GET", "POST"])
 def home():
- q=request.args.get('q','').strip();cat=request.args.get('cat','');sort=request.args.get('sort','new');ps=products()
- if q:ps=[p for p in ps if q.casefold() in (p['name']+' '+p['category']+' '+p['description']).casefold()]
- if cat:ps=[p for p in ps if p['category']==cat]
- if sort=='cheap':ps.sort(key=effective)
- elif sort=='expensive':ps.sort(key=effective,reverse=True)
- cats=sorted({p['category'] for p in products()});until=setting('flash_until');discount=setting('flash_percent','0')
- body=f'<div class=hero><h1>NEXVORA STORE</h1><p>{setting("banner")}</p><p>Premium collection · Special offers</p></div>'
- if discount and until and until>datetime.now().strftime('%Y-%m-%dT%H:%M'):body+=f'<div class=flash>🔥 Flash sale: {discount}% · until {until}</div>'
- body+=f'<form id=search class=row method=get><input id=q class=input name=q value="{q}" placeholder="{t("search")}" style="flex:1"><button type=button class=btn onclick=voice()>🎙</button><select name=cat style="width:auto"><option value="">{t("all")}</option>'+''.join(f'<option value="{c}" {"selected" if cat==c else ""}>{c}</option>' for c in cats)+f'</select><select name=sort style="width:auto"><option value=new>New</option><option value=cheap>Price ↑</option><option value=expensive>Price ↓</option></select><button class=btn>{t("search")}</button></form>'
- body+='<h2>🛍️ Products</h2><div class=grid>'+''.join(card(p) for p in ps)+'</div>' if ps else '<p>'+t('empty')+'</p>'
- body+='<h2>👀 Recently viewed</h2><div class=grid>'+''.join(card(p) for p in viewed())+'</div>'
- return page(body)
-@app.route('/p/<int:pid>')
-def detail(pid):
- p=product(pid)
- if not p:abort(404)
- seen=session.get('viewed',[]);session['viewed']=[pid]+[x for x in seen if x!=pid][:8];im=imgs(p)
- body=f'<h1>{p["name"]}</h1><div class=panel><div class=grid><div><img id=mainpic src="/static/uploads/{im[0] if im else ""}" style="width:100%;max-height:420px;object-fit:contain" onclick="this.style.transform=this.style.transform?\'\':\'scale(1.35)\'"><div class=thumbs>'+''.join(f'<img src=/static/uploads/{x} onclick="document.getElementById(\'mainpic\').src=this.src">' for x in im)+'</div>'
- if p['video']:body+=f'<video controls src=/static/uploads/{p["video"]}></video>'
- body+=f'</div><div><h2 class=price>{money(effective(p))} TJS</h2><p>{p["description"]}</p><p>Stock: {p["stock"]}</p><form method=post action=/cart/add/{pid}><input type=hidden name=csrf value={csrf()}><input class=input type=number name=qty value=1 min=1 max={max(1,p["stock"])}><button class="btn green">{t("buy")}</button></form><a class=btn href=/buy/{pid}>Buy Now</a> <a class=btn href=/share/{pid}>Share</a> <a class=btn href=/qr/{pid}>QR</a></div></div></div>'
- with db() as c:rs=[dict(r) for r in c.execute('select * from reviews where product_id=? order by id desc',(pid,))];qs=[dict(r) for r in c.execute('select * from questions where product_id=? order by id desc',(pid,))]
- avg=sum(r['stars'] for r in rs)/len(rs) if rs else 0;body+=f'<h2>⭐ {avg:.1f} ({len(rs)} reviews)</h2><form method=post action=/review/{pid} class=panel><input type=hidden name=csrf value={csrf()}><input class=input name=customer placeholder="Name"><select name=stars class=input><option>5</option><option>4</option><option>3</option><option>2</option><option>1</option></select><textarea class=input name=body placeholder="Review"></textarea><button class=btn>Submit</button></form>'
- body+=''.join(f'<div class=panel><span class=stars>{"★"*r["stars"]}</span> {r["customer"]}<p>{r["body"]}</p></div>' for r in rs)
- body+=f'<h2>Questions</h2><form method=post action=/question/{pid} class=panel><input type=hidden name=csrf value={csrf()}><input class=input name=customer placeholder=Name><textarea class=input name=body placeholder="Ask question"></textarea><button class=btn>Send</button></form>'+' '.join(f'<div class=panel><p>{q["body"]}</p><p>{q["answer"]}</p></div>' for q in qs)
- body+='<h2>Related products</h2><div class=grid>'+''.join(card(x) for x in products() if x['category']==p['category'] and x['id']!=pid)+'</div>'
- return page(body,p['name'])
-@app.post('/review/<int:pid>')
-def review(pid):
- if not product(pid):abort(404)
- with db() as c:c.execute('insert into reviews(product_id,customer,stars,body) values(?,?,?,?)',(pid,request.form.get('customer','Guest')[:80],max(1,min(5,int(request.form.get('stars',5)))),request.form.get('body','')[:1200]))
- return redirect('/p/'+str(pid))
-@app.post('/question/<int:pid>')
-def question(pid):
- with db() as c:c.execute('insert into questions(product_id,customer,body) values(?,?,?)',(pid,request.form.get('customer','Guest')[:80],request.form.get('body','')[:1000]))
- return redirect('/p/'+str(pid))
-@app.post('/cart/add/<int:pid>')
-def addcart(pid):
- p=product(pid)
- if not p:abort(404)
- c=cart();c[str(pid)]=min(int(c.get(str(pid),0))+int(request.form.get('qty',1)),max(1,int(p['stock'] or 1)));session['cart']=c;flash(t('added'));return redirect(request.referrer or '/')
-@app.get('/buy/<int:pid>')
-def buy(pid):cart()[str(pid)]=1;return redirect('/checkout')
-@app.route('/cart')
-def cartpage():
- rows,total=cart_rows();body='<h1>'+t('cart')+'</h1>'
- body+=''.join(f'<div class=panel><b>{p["name"]}</b> · {q} × {money(effective(p))} = {money(line)} <a class=btn href=/cart/remove/{p["id"]}>Remove</a></div>' for p,q,line in rows)
- body+=f'<h2>{t("total")}: {money(total)}</h2><a class=btn href=/checkout>Checkout</a>' if rows else '<p>Cart empty</p>'
- return page(body)
-@app.get('/cart/remove/<int:pid>')
-def cartremove(pid):cart().pop(str(pid),None);return redirect('/cart')
-@app.route('/promo',methods=['POST'])
-def promo():
- code=request.form.get('code','').strip().upper()
- with db() as c:r=c.execute('select * from promos where code=? and active=1',(code,)).fetchone()
- if r:session['promo']=code;flash('Promo applied')
- else:session.pop('promo',None);flash('Invalid code')
- return redirect('/checkout')
-@app.route('/checkout',methods=['GET','POST'])
-def checkout():
- rows,subtotal=cart_rows();promo=session.get('promo','');disc=0
- if promo:
-  with db() as c:r=c.execute('select * from promos where code=? and active=1',(promo,)).fetchone()
-  if r:disc=subtotal*r['discount']/100 if r['kind']=='percent' else r['discount']
- delivery=float(setting('delivery','0') or 0);total=max(0,subtotal-disc)+delivery
- if request.method=='POST':
-  if not rows:flash('Cart empty');return redirect('/cart')
-  customer=request.form.get('customer','').strip();phone=request.form.get('phone','').strip()
-  if not customer or not phone:flash('Name and phone required');return redirect('/checkout')
-  oid=uuid.uuid4().hex[:10].upper();items=[{'product':p['name'],'id':p['id'],'qty':q,'price':effective(p)} for p,q,line in rows]
-  with db() as c:
-   c.execute('insert into orders(id,customer,phone,address,note,items,subtotal,discount,delivery,total,promo,payment) values(?,?,?,?,?,?,?,?,?,?,?,?)',(oid,customer,phone,request.form.get('address',''),request.form.get('note',''),json.dumps(items),subtotal,disc,delivery,total,promo,request.form.get('payment','cash')))
-   for p,q,line in rows:c.execute('update products set stock=max(0,stock-?) where id=?',(q,p['id']))
-  session['cart']={};session.pop('promo',None);flash(t('orderok')+': '+oid);return redirect('/track?id='+oid)
- body=f'<h1>{t("checkout")}</h1><div class=panel><p>Subtotal {money(subtotal)} · Discount {money(disc)} · Delivery {money(delivery)}</p><h2>{t("total")}: {money(total)} TJS</h2></div><form method=post class=panel><input type=hidden name=csrf value={csrf()}><input class=input name=customer placeholder="{t("name")}" required><input class=input name=phone placeholder="{t("phone")}" required><input class=input name=address placeholder="{t("address")}" required><textarea class=input name=note placeholder="Note"></textarea><select class=input name=payment><option value=cash>{t("cash")}</option><option value=manual>Manual / transfer</option></select><button class=btn>{t("send")}</button></form><form method=post action=/promo><input type=hidden name=csrf value={csrf()}><input class=input name=code placeholder="{t("promo")}"/><button class=btn>{t("apply")}</button></form>'
- return page(body)
-@app.route('/track')
-def track():
- oid=request.args.get('id','').upper()
- with db() as c:r=c.execute('select id,status,created from orders where id=?',(oid,)).fetchone() if oid else None
- body=f'<h1>{t("track")}</h1><form><input class=input name=id placeholder="Order code"><button class=btn>Search</button></form>'
- if r:body+=f'<div class=panel><h2>{r["id"]}</h2><p>{r["status"]}</p><p>{r["created"]}</p><a class=btn href=/invoice/{r["id"]}>Invoice</a></div>'
- elif oid:body+='<p>Order not found</p>'
- return page(body)
-@app.route('/fav/<int:pid>')
-def fav(pid):
- f=session.get('favorites',[])
- if pid in f:f.remove(pid)
- else:f.append(pid)
- session['favorites']=f;return redirect(request.referrer or '/')
-@app.route('/favorites')
-def favorites():return page('<h1>'+t('fav')+'</h1><div class=grid>'+''.join(card(p) for i in session.get('favorites',[]) if (p:=product(i)))+'</div>')
-@app.route('/compare/add/<int:pid>')
-def compareadd(pid):
- a=session.get('compare',[])
- if pid not in a:a.append(pid)
- session['compare']=a[:4];return redirect('/compare')
-@app.route('/compare')
-def compare():
- ps=[product(i) for i in session.get('compare',[])];ps=[p for p in ps if p]
- body='<h1>Compare up to 4</h1><div class=grid>'+''.join(card(p) for p in ps)+'</div><div class=panel><table>'+''.join(f'<tr><td>{p["name"]}</td><td>{money(effective(p))} TJS</td><td>{p["category"]}</td><td>{p["stock"]}</td></tr>' for p in ps)+'</table></div>'
- return page(body)
-@app.route('/share/<int:pid>')
-def share(pid):p=product(pid);return redirect('https://wa.me/?text='+quote(f'NEXVORA {p["name"]}: {request.url}')) if p else abort(404)
-@app.route('/qr/<int:pid>')
-def qr(pid):
- if not product(pid):abort(404)
- link=request.url_root+'p/'+str(pid);return page(f'<h1>QR · Product</h1><img style="width:240px;background:white;padding:8px" src="https://api.qrserver.com/v1/create-qr-code/?size=240x240&data={quote(link)}"><p><a class=btn href={link}>Product link</a></p>')
-@app.route('/invoice/<oid>')
-def invoice(oid):
- with db() as c:r=c.execute('select * from orders where id=?',(oid.upper(),)).fetchone()
- if not r:abort(404)
- return page(f'<h1>Invoice {r["id"]}</h1><div class=panel><p>{r["customer"]} · {r["phone"]}</p><p>Subtotal: {r["subtotal"]}</p><p>Discount: {r["discount"]}</p><p>Delivery: {r["delivery"]}</p><h2>Total: {r["total"]} TJS</h2></div><button class=btn onclick="print()">Print/PDF</button>')
-@app.route('/gift',methods=['GET','POST'])
-def gift():
- if request.method=='POST':
-  amount=max(1,float(request.form.get('amount',1)));code=secrets.token_hex(4).upper()
-  with db() as c:c.execute('insert into giftcards values(?,?,?,1)',(code,amount,amount))
-  flash('Gift Card code: '+code)
- return page('<h1>Gift Card</h1><form method=post><input type=hidden name=csrf value='+csrf()+'><input class=input type=number min=1 name=amount placeholder=Amount><button class=btn>Create gift card</button></form>')
-@app.route('/referral')
-def referral():
- code=session.setdefault('refcode',secrets.token_hex(3).upper());return page(f'<h1>Referral</h1><p>Your invite code: <b>{code}</b></p><p>Invite/share code. Bonus settings: {setting("ref_bonus","10")}</p>')
-@app.route('/manifest.json')
-def manifest():return jsonify(name='NEXVORA STORE',short_name='NEXVORA',start_url='/',display='standalone',background_color='#09090b',theme_color='#e8c958')
-@app.route('/sw.js')
-def sw():return Response("self.addEventListener('install',e=>self.skipWaiting());self.addEventListener('fetch',e=>{});",mimetype='application/javascript')
-# Admin section
-@app.route('/admin',methods=['GET','POST'])
-def adminlogin():
- if adminok():return redirect('/admin/dashboard')
- if request.method=='POST':
-  if hmac.compare_digest(request.form.get('password',''),ADMIN):session.clear();session['admin']=True;session['csrf']=secrets.token_hex(24);log('login','admin');return redirect('/admin/dashboard')
-  flash('Password incorrect')
- return page('<h1>Admin Login</h1><form method=post class=panel><input type=hidden name=csrf value='+csrf()+'><input class=input type=password name=password placeholder=Password><button class=btn>Login</button></form>')
-@app.route('/admin/dashboard')
-def dashboard():
- if not adminok():return redirect('/admin')
- with db() as c:orders=[dict(x) for x in c.execute('select * from orders order by created desc')];sales=c.execute('select coalesce(sum(total),0) from orders').fetchone()[0];reviews=c.execute('select count(*) from reviews').fetchone()[0];logs=[dict(x) for x in c.execute('select * from logs order by id desc limit 20')];questions=[dict(x) for x in c.execute('select * from questions order by id desc')]
- body=f'<h1>Admin PRO Dashboard</h1><div class=grid><div class=panel>Products: {len(products())}</div><div class=panel>Orders: {len(orders)}</div><div class=panel>Sales: {money(sales)} TJS</div><div class=panel>Reviews: {reviews}</div></div><h2>Orders</h2><div class=panel>'+''.join(f'<p>#{o["id"]} {o["customer"]} {o["phone"]} {money(o["total"])} · {o["status"]} <a class=btn href=/admin/status/{o["id"]}>Status</a></p>' for o in orders)+'</div>'
- body+='<h2>Add product / multiple photos / video</h2><form class=panel method=post action=/admin/add enctype=multipart/form-data><input type=hidden name=csrf value='+csrf()+'><input class=input name=name required placeholder=Name><input class=input name=price type=number step=.01 required placeholder=Price><input class=input name=old_price type=number step=.01 placeholder=Old price><input class=input name=sale_price type=number step=.01 placeholder=Sale price><input class=input name=category placeholder=Category><textarea class=input name=description placeholder=Description></textarea><input class=input name=stock type=number placeholder=Stock value=10><label>Photos (multiple) <input type=file name=images multiple accept=image/*></label><label>Video <input type=file name=video accept=video/mp4,video/webm></label><input class=input name=scheduled type=datetime-local><button class=btn>Add product</button></form>'
- body+='<h2>Manage products</h2><div class=grid>'+''.join(f'<div class=panel><b>{p["name"]}</b> · {p["price"]} · stock {p["stock"]}<form method=post action=/admin/delete/{p["id"]}><input type=hidden name=csrf value={csrf()}><button class="btn red">Delete</button></form></div>' for p in products())+'</div>'
- body+='<h2>Promo code</h2><form class=panel method=post action=/admin/promo><input type=hidden name=csrf value='+csrf()+'><input class=input name=code placeholder=Code><input class=input name=discount type=number placeholder=Discount><select name=kind><option value=amount>Somoni</option><option value=percent>Percent</option></select><button class=btn>Create</button></form>'
- body+='<h2>Settings / Banner / delivery / flash sale</h2><form class=panel method=post action=/admin/settings><input type=hidden name=csrf value='+csrf()+'><input class=input name=banner value="'+setting('banner')+'"><input class=input name=delivery type=number value='+setting('delivery','0')+' placeholder=Delivery><input class=input name=flash_percent type=number value='+setting('flash_percent','0')+' placeholder=Flash percent><input class=input name=flash_until type=datetime-local value="'+setting('flash_until','')+'"><button class=btn>Save settings</button></form>'
- body+='<h2>CSV</h2><a class=btn href=/admin/export>Export CSV</a><form class=panel method=post action=/admin/import enctype=multipart/form-data><input type=hidden name=csrf value='+csrf()+'><input type=file name=file accept=.csv><button class=btn>Import</button></form><h2>Low inventory</h2><div class=panel>'+''.join(f'<p>{p["name"]}: {p["stock"]}</p>' for p in products() if p['stock']<5)+'</div>'
- body+='<h2>Questions (admin replies are available in database/log for now)</h2><div class=panel>'+''.join(f'<p>Product {q["product_id"]}: {q["body"]}</p>' for q in questions)+'</div><h2>Activity log</h2><div class=panel>'+''.join(f'<p>{l["created"]} {l["action"]}: {l["detail"]}</p>' for l in logs)+'</div><a class=btn red href=/admin/logout>Logout</a>'
- return page(body)
-@app.post('/admin/add')
-def adminadd():
- if not adminok():return redirect('/admin')
- try:pr=float(request.form.get('price',0));stock=max(0,int(request.form.get('stock',0)));old=float(request.form.get('old_price',0) or 0);sale=float(request.form.get('sale_price',0) or 0)
- except:flash('Invalid price/stock');return redirect('/admin/dashboard')
- pics=uploads(request.files.getlist('images'),IMG);videos=uploads([request.files.get('video')],VID)
- with db() as c:c.execute('insert into products(name,price,old_price,sale_price,category,description,images,video,stock,scheduled) values(?,?,?,?,?,?,?,?,?,?)',(request.form.get('name',''),pr,old,sale,request.form.get('category','Дигар'),request.form.get('description',''),json.dumps(pics),videos[0] if videos else '',stock,request.form.get('scheduled','')))
- log('product_add',request.form.get('name'));flash('Product added');return redirect('/admin/dashboard')
-@app.post('/admin/delete/<int:pid>')
-def admindel(pid):
- if not adminok():return redirect('/admin')
- with db() as c:c.execute('update products set active=0 where id=?',(pid,))
- log('product_delete',pid);return redirect('/admin/dashboard')
-@app.post('/admin/promo')
-def adminpromo():
- if not adminok():return redirect('/admin')
- code=request.form.get('code','').upper().strip();discount=float(request.form.get('discount',0) or 0)
- with db() as c:c.execute('insert or replace into promos(code,discount,kind,active) values(?,?,?,1)',(code,discount,request.form.get('kind','amount')))
- log('promo_create',code);return redirect('/admin/dashboard')
-@app.post('/admin/settings')
-def adminsettings():
- if not adminok():return redirect('/admin')
- for k in ['banner','delivery','flash_percent','flash_until']:
-  with db() as c:c.execute('insert or replace into settings(key,value) values(?,?)',(k,request.form.get(k,'')))
- log('settings_update');return redirect('/admin/dashboard')
-@app.route('/admin/status/<oid>',methods=['GET','POST'])
-def adminstatus(oid):
- if not adminok():return redirect('/admin')
- with db() as c:
-  if request.method=='POST':c.execute('update orders set status=? where id=?',(request.form.get('status'),oid));log('order_status',oid)
-  r=c.execute('select * from orders where id=?',(oid,)).fetchone()
- if not r:abort(404)
- return page(f'<h1>Order {oid}</h1><p>{r["customer"]} · {r["phone"]} · {r["total"]}</p><form method=post><input type=hidden name=csrf value={csrf()}><select class=input name=status><option>Қабул шуд</option><option>Тасдиқ шуд</option><option>Омода мешавад</option><option>Фиристода шуд</option><option>Анҷом ёфт</option><option>Бекор</option></select><button class=btn>Update status</button></form>')
-@app.get('/admin/export')
-def exportcsv():
- if not adminok():return redirect('/admin')
- with db() as c:rows=c.execute('select id,name,price,category,stock,description from products').fetchall()
- f=io.StringIO();w=csv.writer(f);w.writerow(['id','name','price','category','stock','description']);w.writerows(rows);r=make_response(f.getvalue());r.headers['Content-Disposition']='attachment; filename=nexvora.csv';r.headers['Content-Type']='text/csv; charset=utf-8';return r
-@app.post('/admin/import')
-def importcsv():
- if not adminok():return redirect('/admin')
- f=request.files.get('file')
- if f:
-  reader=csv.DictReader(io.StringIO(f.stream.read().decode('utf-8-sig')))
-  with db() as c:
-   for row in reader:
-    try:c.execute('insert into products(name,price,category,stock,description) values(?,?,?,?,?)',(row.get('name',''),float(row.get('price',0)),row.get('category','Дигар'),int(row.get('stock',0)),row.get('description','')))
-    except Exception:pass
- flash('CSV imported');return redirect('/admin/dashboard')
-@app.get('/admin/logout')
-def logout():session.clear();return redirect('/')
-@app.errorhandler(413)
-def too_big(e):return 'Файл аз лимити 80MB зиёд аст.',413
-if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.environ.get('PORT','5000')),debug=False)
+
+    if request.method == "POST":
+
+        name = request.form.get("name", "").strip()
+        price = request.form.get("price", "").strip()
+        image = request.files.get("image")
+
+        if name and price:
+
+            filename = ""
+
+            if image and image.filename:
+                ext = image.filename.rsplit(".", 1)[-1].lower()
+
+                if ext not in ALLOWED:
+                    return "Формати акс нодуруст аст!", 400
+
+                filename = str(uuid.uuid4()) + "." + ext
+                image.save(os.path.join(UPLOAD_FOLDER, filename))
+
+            products.append({
+                "name": name,
+                "price": price,
+                "image": filename
+            })
+
+            save_products()
+
+        return redirect("/")
+
+    return render_template_string(
+        HTML,
+        products=products,
+        phone=WHATSAPP_NUMBER
+    )
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000)
