@@ -1,59 +1,34 @@
+NEXVORA STORE TJ — V75 — Render deploy package
 
-# NEXVORA STORE
+ИН ПАКЕТ БАРОИ ҶОЙГИРКУНӢ ДАР RENDER ТАЙЁР ШУДААСТ.
 
-A Flask-based online store with:
-- Product catalog
-- Shopping cart and checkout
-- Favorites and product comparison
-- Admin dashboard
-- Product images and videos
-- Reviews and questions
-- Promo codes
-- Order tracking
-- CSV import/export
-- Tajik, Russian and English languages
+Муҳим:
+- render.yaml барои Web Service-и пулакӣ (Starter) ва диски доимии 1 GB омода шудааст.
+- Диски доимӣ барои nexvora.db, uploads, secret key ва log истифода мешавад.
+- Пеш аз истифодаи мағоза ADMIN_PASSWORD ва WHATSAPP_NUMBER-ро дар Render пур кунед.
+- ADMIN_PASSWORD бояд пароли қавӣ ва махсус бошад. Онро ба касе нафиристед.
+- SECRET_KEY аз тарафи Render сохта мешавад.
 
-## Installation
+ҚАДАМҲО:
+1. ZIP-ро кушоед.
+2. Папкаи nexvora_render_deploy-ро ба GitHub ҳамчун repository-и Private бор кунед.
+3. Ба https://dashboard.render.com ворид шавед.
+4. New + -> Blueprint интихоб кунед.
+5. GitHub repository-и NEXVORA-ро пайваст кунед.
+6. Render render.yaml-ро мехонад. Service-и nexvora-store-tj пайдо мешавад.
+7. Дар Environment пур кунед:
+   ADMIN_PASSWORD = пароли қавии Admin
+   WHATSAPP_NUMBER = рақами WhatsApp бо рамзи кишвар, танҳо рақамҳо
+8. Нақша ва пардохти Starter + disk-ро бо иҷозати соҳиби ҳисоб/падару модар тасдиқ кунед.
+9. Deploy кунед. Баъд аз анҷом URL-и *.onrender.com-ро кушоед.
+10. Санҷед: https://АДРЕСИ-ШУМО.onrender.com/healthz
+    Ҷавоби дуруст бояд status=ok ва version=V75 дошта бошад.
 
-```bash
-pip install -r requirements.txt
-```
+ДОМЕН:
+Пас аз фаъол шудани сомона дар Render -> Settings -> Custom Domains доменро илова кунед.
+DNS record-ҳои пешниҳодкардаи Render-ро дар ширкати фурӯшандаи домен гузоред.
 
-## Run locally
-
-```bash
-python app.py
-```
-
-## Render Deployment
-
-Build Command:
-
-```bash
-pip install -r requirements.txt
-```
-
-Start Command:
-
-```bash
-gunicorn app:app
-```
-
-## Environment Variables
-
-- SECRET_KEY: Secret key for Flask sessions
-- ADMIN_PASSWORD: Admin login password
-- WHATSAPP_NUMBER: WhatsApp contact number
-
-## Database
-
-SQLite database:
-nexvora_pro.db
-
-Product uploads:
-static/uploads/
-
-## Default Admin Password
-
-Set ADMIN_PASSWORD in environment variables before deployment.
-
+ОГОҲӢ:
+- Барои нигоҳ доштани база ва аксҳо диски доимӣ зарур аст; ин конфигуратсия Starter-ро истифода мебарад.
+- Барои мағозаи воқеӣ нусхаи эҳтиётии база ва санҷиши фармоишҳоро ташкил кунед.
+- Дар ин марҳила deploy ба Render аз тарафи мо иҷро нашудааст: соҳиби аккаунт бояд GitHub ва Render-ро пайваст кунад.
